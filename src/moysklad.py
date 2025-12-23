@@ -32,16 +32,15 @@ class MoySkladClient:
         )
         return request_json("PUT", url, headers=self._headers(), json_body=body)
 
-    # ---------- CustomerOrder search ----------
+    # ---------- CustomerOrder ----------
 
     def find_customerorder_by_name(self, order_name: str) -> Optional[Dict[str, Any]]:
-        order_name = order_name.strip()
+        order_name = (order_name or "").strip()
         if not order_name:
             return None
 
         safe = order_name.replace('"', '\\"')
 
-        # 1) exact match by name
         page = self.get(
             "/entity/customerorder",
             params={"limit": 100, "filter": f'name="{safe}"'},
@@ -51,7 +50,6 @@ class MoySkladClient:
             rows.sort(key=lambda r: r.get("moment", ""), reverse=True)
             return rows[0]
 
-        # 2) fallback: search
         page = self.get(
             "/entity/customerorder",
             params={"limit": 100, "search": order_name},
@@ -63,29 +61,17 @@ class MoySkladClient:
         rows.sort(key=lambda r: r.get("moment", ""), reverse=True)
         return rows[0]
 
-    def find_customerorder_by_attr_href_value(self, attr_href: str, value: str) -> Optional[Dict[str, Any]]:
-        """
-        Find customerorder by custom attribute using exact attribute meta.href (no name resolution).
-        """
-        attr_href = (attr_href or "").strip()
-        value = (value or "").strip()
-        if not attr_href or not value:
-            return None
-
-        for expr in (f'{attr_href}="{value}"', f"{attr_href}={value}"):
-            page = self.get("/entity/customerorder", params={"limit": 100, "filter": expr})
-            rows = page.get("rows", []) or []
-            if rows:
-                rows.sort(key=lambda r: r.get("moment", ""), reverse=True)
-                return rows[0]
-        return None
-
-    # ---------- CustomerOrder details/update ----------
-
     def get_customerorder_full(self, order_id: str) -> Dict[str, Any]:
+        # attributes values are included in entity read, positions expanded for your bundle logic
         return self.get(
             f"/entity/customerorder/{order_id}",
             params={"expand": "positions.assortment"},
+        )
+
+    def update_customerorder_description(self, order_id: str, new_description: str) -> Any:
+        return self.put(
+            f"/entity/customerorder/{order_id}",
+            {"description": new_description},
         )
 
     def get_bundle_components(self, bundle_href: str) -> List[Dict[str, Any]]:
@@ -95,8 +81,51 @@ class MoySkladClient:
         )
         return (bundle.get("components") or {}).get("rows") or []
 
-    def update_customerorder_description(self, order_id: str, new_description: str) -> Any:
-        return self.put(
-            f"/entity/customerorder/{order_id}",
-            {"description": new_description},
-        )
+    # ---------- Robust find by attribute href + value ----------
+
+    @staticmethod
+    def _attr_value_matches(attr: Dict[str, Any], attr_href: str, value: str) -> bool:
+        meta = (attr.get("meta") or {})
+        href = (meta.get("href") or "").strip()
+        if href != attr_href.strip():
+            return False
+        v = attr.get("value")
+        # value can be str/number/bool/link; for our case it's str
+        return str(v).strip() == value.strip()
+
+    def find_customerorder_by_attr_href_value(self, attr_href: str, value: str) -> Optional[Dict[str, Any]]:
+        """
+        1) Try fast server-side filter by attribute href.
+        2) If returns nothing, do search=value and verify attributes in full objects.
+        This avoids edge cases where filter syntax behaves differently.
+        """
+        attr_href = (attr_href or "").strip()
+        value = (value or "").strip()
+        if not attr_href or not value:
+            return None
+
+        # (A) Fast path: filter
+        for expr in (f'{attr_href}="{value}"', f"{attr_href}={value}"):
+            page = self.get("/entity/customerorder", params={"limit": 50, "filter": expr})
+            rows = page.get("rows", []) or []
+            if rows:
+                rows.sort(key=lambda r: r.get("moment", ""), reverse=True)
+                return rows[0]
+
+        # (B) Robust path: search + verify
+        page = self.get("/entity/customerorder", params={"limit": 50, "search": value})
+        candidates = page.get("rows", []) or []
+        if not candidates:
+            return None
+
+        for r in candidates:
+            oid = r.get("id")
+            if not oid:
+                continue
+            full = self.get_customerorder_full(oid)
+            attrs = full.get("attributes") or []
+            for a in attrs:
+                if isinstance(a, dict) and self._attr_value_matches(a, attr_href, value):
+                    return full  # return full object (has id/name/etc.)
+
+        return None
