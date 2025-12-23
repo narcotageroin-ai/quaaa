@@ -1,9 +1,8 @@
-from __future__ import annotations
-
 from typing import Any, Dict, List, Optional
 from urllib.parse import urljoin
 
 from src.http import request_json
+
 
 class MoySkladClient:
     def __init__(self, base_url: str, token: str):
@@ -18,51 +17,91 @@ class MoySkladClient:
         }
 
     def get(self, path_or_url: str, params: Optional[Dict[str, Any]] = None) -> Any:
-        url = path_or_url if path_or_url.startswith("http") else urljoin(self.base_url, path_or_url.lstrip("/"))
+        url = (
+            path_or_url
+            if path_or_url.startswith("http")
+            else urljoin(self.base_url, path_or_url.lstrip("/"))
+        )
         return request_json("GET", url, headers=self._headers(), params=params)
 
     def put(self, path_or_url: str, body: Dict[str, Any]) -> Any:
-        url = path_or_url if path_or_url.startswith("http") else urljoin(self.base_url, path_or_url.lstrip("/"))
+        url = (
+            path_or_url
+            if path_or_url.startswith("http")
+            else urljoin(self.base_url, path_or_url.lstrip("/"))
+        )
         return request_json("PUT", url, headers=self._headers(), json_body=body)
 
     def find_customerorder_by_name(self, order_name: str) -> Optional[Dict[str, Any]]:
-        page = self.get("/entity/customerorder", params={"limit": 100, "filter": f"name={order_name}"})
+        order_name = order_name.strip()
+        if not order_name:
+            return None
+
+        safe = order_name.replace('"', '\\"')
+        page = self.get(
+            "/entity/customerorder",
+            params={"limit": 100, "filter": f'name="{safe}"'},
+        )
+        rows = page.get("rows", []) or []
+        if rows:
+            rows.sort(key=lambda r: r.get("moment", ""), reverse=True)
+            return rows[0]
+
+        page = self.get(
+            "/entity/customerorder",
+            params={"limit": 100, "search": order_name},
+        )
         rows = page.get("rows", []) or []
         if not rows:
             return None
+
         rows.sort(key=lambda r: r.get("moment", ""), reverse=True)
         return rows[0]
 
-    def get_customerorder_full(self, order_id: str) -> Dict[str, Any]:
-        return self.get(f"/entity/customerorder/{order_id}", params={"expand": "positions.assortment"})
-
-    def get_bundle_components(self, bundle_href: str) -> List[Dict[str, Any]]:
-        bundle = self.get(bundle_href, params={"expand": "components.assortment,attributes"})
-        return (bundle.get("components") or {}).get("rows") or []
-
-    def update_customerorder_description(self, order_id: str, new_description: str) -> Any:
-        return self.put(f"/entity/customerorder/{order_id}", {"description": new_description})
-        def _get_customerorder_attr_href_by_name(self, attr_name: str) -> Optional[str]:
+    def _get_customerorder_attr_href_by_name(self, attr_name: str) -> Optional[str]:
         meta = self.get("/entity/customerorder/metadata")
         attrs = meta.get("attributes") or []
         for a in attrs:
             if str(a.get("name", "")).strip() == attr_name.strip():
-                m = a.get("meta") or {}
-                href = m.get("href")
-                return href
+                return (a.get("meta") or {}).get("href")
         return None
 
-    def find_customerorder_by_attr_value(self, attr_name: str, value: str) -> Optional[Dict[str, Any]]:
+    def find_customerorder_by_attr_value(
+        self, attr_name: str, value: str
+    ) -> Optional[Dict[str, Any]]:
         href = self._get_customerorder_attr_href_by_name(attr_name)
         if not href:
             return None
 
         value = value.strip()
-        # Пробуем 2 варианта (МС иногда любит кавычки для строк)
-        for expr in (f"{href}={value}", f'{href}="{value}"'):
-            page = self.get("/entity/customerorder", params={"limit": 100, "filter": expr})
+        for expr in (f'{href}="{value}"', f"{href}={value}"):
+            page = self.get(
+                "/entity/customerorder",
+                params={"limit": 100, "filter": expr},
+            )
             rows = page.get("rows", []) or []
             if rows:
                 rows.sort(key=lambda r: r.get("moment", ""), reverse=True)
                 return rows[0]
         return None
+
+    def get_customerorder_full(self, order_id: str) -> Dict[str, Any]:
+        return self.get(
+            f"/entity/customerorder/{order_id}",
+            params={"expand": "positions.assortment"},
+        )
+
+    def get_bundle_components(self, bundle_href: str) -> List[Dict[str, Any]]:
+        bundle = self.get(
+            bundle_href,
+            params={"expand": "components.assortment,attributes"},
+        )
+        return (bundle.get("components") or {}).get("rows") or []
+
+    def update_customerorder_description(
+        self, order_id: str, new_description: str
+    ) -> Any:
+        return self.put(
+            f"/entity/customerorder/{order_id}",
+            {"description": new_description},
+        )
