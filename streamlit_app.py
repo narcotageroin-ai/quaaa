@@ -47,7 +47,13 @@ if load_btn:
         st.stop()
 
     with st.spinner("Ищу заказ в МойСклад..."):
-       from src.http import HttpError  # добавь импорт сверху
+       import os
+import datetime as dt
+import streamlit as st
+
+from src.http import HttpError
+from src.config import Settings
+from src.moysklad import MoySkladClient
 
 try:
     row = ms.find_customerorder_by_name(order_name.strip())
