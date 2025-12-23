@@ -115,6 +115,13 @@ class MoySkladClient:
         offset = 0
         scanned = 0
 
+        def _progress():
+            if progress_cb:
+                # единый контракт: (scanned, total, offset)
+                progress_cb(scanned, limit_total, offset)
+
+        _progress()
+
         while scanned < limit_total:
             take = min(page_size, limit_total - scanned)
             rows = self.list_customerorders_page(limit=take, offset=offset)
@@ -128,20 +135,19 @@ class MoySkladClient:
 
                 oid = co.get("id")
                 if not oid:
+                    _progress()
                     continue
 
-                # ключевая часть: дочитываем полный заказ
                 full = self.get_customerorder(oid)
-
                 if self._attr_match_full(full, attr_id=attr_id, attr_name=attr_name, value=value):
+                    _progress()
                     return full
 
-                if progress_cb and scanned % 20 == 0:
-                    progress_cb(scanned, limit_total)
+                if scanned % 20 == 0:
+                    _progress()
 
             offset += len(rows)
-            if progress_cb:
-                progress_cb(scanned, limit_total)
+            _progress()
 
         return None
 
