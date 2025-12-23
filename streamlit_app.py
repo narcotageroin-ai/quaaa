@@ -9,27 +9,25 @@ from src.cis_logic import normalize_codes, replace_cis_block
 
 
 st.set_page_config(page_title="CIS Scanner", layout="wide")
-st.write("BUILD:", "2025-12-23 QR-ATTR-FIND")
+st.write("BUILD:", "2025-12-23 ATTR-HREF")
 st.title("Сканер маркировки (DataMatrix) → МойСклад (customerorder.description)")
 
 
 def load_settings() -> Settings:
     data = {}
-
-    # Streamlit secrets
     try:
         for k, v in st.secrets.items():
             data[k] = str(v)
     except Exception:
         pass
 
-    # env vars
     keys = [
         "MS_BASE_URL",
         "MS_TOKEN",
         "MS_ATTR_CIS_REQUIRED",
         "MS_BUNDLE_MARK_FLAG",
-        "MS_ORDER_QR_ATTR_NAME",
+        "MS_ORDER_QR_ATTR_NAME",   # оставим как fallback
+        "MS_ORDER_QR_ATTR_HREF",   # главный способ
         "MAX_COMPONENT_FETCH",
     ]
     for k in keys:
@@ -46,10 +44,14 @@ def load_order(ms: MoySkladClient, settings: Settings, query: str) -> None:
         st.stop()
 
     try:
-        # 1) try QR attribute in customerorder
-        row = ms.find_entity_by_attr_value("customerorder", settings.MS_ORDER_QR_ATTR_NAME, query)
+        row = None
 
-        # 2) fallback: by customerorder.name
+        # 1) Главный способ: поиск по href атрибута (самый надежный)
+        attr_href = getattr(settings, "MS_ORDER_QR_ATTR_HREF", "") or ""
+        if attr_href.strip():
+            row = ms.find_customerorder_by_attr_href_value(attr_href, query)
+
+        # 2) Fallback: по номеру заказа
         if not row:
             row = ms.find_customerorder_by_name(query)
 
@@ -102,53 +104,7 @@ ms = MoySkladClient(
     token=settings.ms_auth_header(),
 )
 
-# DEBUG кнопка — покажет, как API реально видит атрибуты customerorder
-with st.sidebar:
-    st.divider()
-    debug_order = st.text_input("DEBUG: номер заказа (customerorder.name)", value="")
-    if st.button("DEBUG: показать поля заказа"):
-        if not debug_order.strip():
-            st.error("Введи номер заказа")
-            st.stop()
-        try:
-            row = ms.find_customerorder_by_name(debug_order.strip())
-            if not row:
-                st.error("Заказ не найден")
-                st.stop()
-
-            full = ms.get_customerorder_full(row["id"])
-
-            # Вытаскиваем основные поля, где чаще всего лежит такой QR/штрихкод
-            dbg = {
-                "id": full.get("id"),
-                "name": full.get("name"),
-                "code": full.get("code"),
-                "externalCode": full.get("externalCode"),
-                "description": full.get("description"),
-                "agent": (full.get("agent") or {}).get("meta"),
-                "shipmentAddress": full.get("shipmentAddress"),
-                "shipmentAddressFull": full.get("shipmentAddressFull"),
-                "organizationAccount": (full.get("organizationAccount") or {}).get("meta"),
-                "attributes": full.get("attributes"),
-            }
-            st.json(dbg)
-
-            # Дополнительно: покажем позиции (иногда QR кладут в позицию/коммент)
-            pos = (full.get("positions") or {}).get("rows") or []
-            st.write("positions count:", len(pos))
-            if pos:
-                st.json(pos[0])  # первая позиция как пример
-
-        except HttpError as e:
-            st.error(f"HTTP {e.status}")
-            st.json(e.payload)
-        st.stop()
-
-
-
-
-
-st.markdown("### Сканируй QR из oShip (значение из доп.поля) или введи номер заказа")
+st.markdown("### Сканируй QR из oShip (ШККОД128) или введи номер заказа")
 
 with st.form("scan_form", clear_on_submit=False):
     scan_value = st.text_input(
