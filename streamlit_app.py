@@ -6,25 +6,30 @@ from src.moysklad import MoySkladClient, HttpError
 
 
 st.set_page_config(page_title="CIS Scanner → МойСклад", layout="centered")
-st.write("BUILD:", "2025-12-23 TWO-BUTTONS")
+st.write("BUILD:", "2025-12-23 ATTR-BRUTEFORCE")
 st.title("Сканер маркировки (DataMatrix) → МойСклад (customerorder.description)")
 
 
-# -------- Settings (secrets first) --------
 with st.sidebar:
     st.header("Настройки")
 
     ms_token = st.text_input("MS_TOKEN", type="password", value=st.secrets.get("MS_TOKEN", ""))
+
+    # ВАЖНО: фильтра по attributes.<id> в МС нет, поэтому ID нужен для сверки внутри attributes[]
     qr_attr_id = st.text_input(
-        "MS_ORDER_QR_ATTR_ID (ID доп.поля ШККОД128)",
+        "MS_ORDER_QR_ATTR_ID (id доп.поля ШККОД128)",
         value=st.secrets.get("MS_ORDER_QR_ATTR_ID", "687d964c-5a22-11ee-0a80-032800443111"),
     )
     qr_attr_name = st.text_input(
-        "MS_ORDER_QR_ATTR_NAME (fallback имя)",
+        "MS_ORDER_QR_ATTR_NAME (имя доп.поля, fallback)",
         value=st.secrets.get("MS_ORDER_QR_ATTR_NAME", "ШККОД128"),
     )
 
-    st.caption("ID берём из JSON заказа: атрибут 'ШККОД128' → поле 'id'.")
+    limit_total = st.number_input("Сколько последних заказов смотреть (limit_total)", min_value=500, max_value=20000, value=int(st.secrets.get("LIMIT_TOTAL", 5000)))
+    page_size = st.number_input("Размер страницы (page_size)", min_value=50, max_value=1000, value=int(st.secrets.get("PAGE_SIZE", 200)))
+
+    st.caption("Поиск идёт перебором последних заказов, потому что фильтр по доп.полям в API не поддерживается.")
+
 
 if not ms_token.strip():
     st.warning("Укажи MS_TOKEN в сайдбаре (Streamlit Secrets или вручную).")
@@ -33,32 +38,41 @@ if not ms_token.strip():
 ms = MoySkladClient(token=ms_token)
 
 
-def find_order(value: str, show_progress: bool = True):
-    value = (value or "").strip()
+def normalize_scan(s: str) -> str:
+    # пока просто strip — у тебя repr чистый
+    return (s or "").strip()
+
+
+def find_order(value: str):
+    value = normalize_scan(value)
     if not value:
         return None
 
-    # 1) основной метод — filter по attributes.<attrId>=value
-    order = ms.find_customerorder_by_attr_id_value(qr_attr_id.strip(), value)
+    prog = st.progress(0, text="Ищу заказ по доп.полю (перебор последних заказов)...")
+    status = st.empty()
 
-    # 2) fallback — search
-    if not order:
-        order = ms.search_customerorder(value)
+    def cb(scanned: int, total: int, offset: int):
+        pct = int(min(100, (scanned / total) * 100))
+        prog.progress(pct, text=f"Проверено заказов: {scanned}/{total} (offset={offset})")
+        status.write(f"Проверено: {scanned} / {total}")
 
-    # 3) fallback — bruteforce
-    if not order:
-        if show_progress:
-            with st.spinner("Не нашёл быстрыми методами. Перебираю последние заказы..."):
-                order = ms.find_customerorder_by_attr_bruteforce_recent(qr_attr_name.strip(), value, limit_total=2000)
-        else:
-            order = ms.find_customerorder_by_attr_bruteforce_recent(qr_attr_name.strip(), value, limit_total=2000)
+    # 1) основной надёжный метод: перебор последних заказов и сверка attributes[]
+    order = ms.find_customerorder_by_attr_value_recent(
+        value=value,
+        attr_id=qr_attr_id.strip(),
+        attr_name=qr_attr_name.strip(),
+        limit_total=int(limit_total),
+        page_size=int(page_size),
+        progress_cb=cb,
+    )
 
+    prog.progress(100, text="Готово")
     return order
 
 
 st.subheader("1) Сканируй QR/Code128 (ШККОД128), например `*CtzwYRSH`")
 scan = st.text_input("Скан", value="", placeholder="*CtzwYRSH")
-st.caption(f"DEBUG scan repr: {scan.strip()!r}" if scan else "DEBUG scan repr: ''")
+st.caption(f"DEBUG scan repr: {normalize_scan(scan)!r}" if scan else "DEBUG scan repr: ''")
 
 st.subheader("2) Коды DataMatrix (каждый с новой строки)")
 cis_block = st.text_area(
@@ -69,17 +83,17 @@ cis_block = st.text_area(
 
 col1, col2 = st.columns(2)
 with col1:
-    find_btn = st.button("🔎 Найти заказ по QR", type="primary", disabled=not scan.strip())
+    find_btn = st.button("🔎 Найти заказ по QR", type="primary", disabled=not normalize_scan(scan))
 with col2:
-    write_btn = st.button("✅ Записать [CIS] в description", disabled=not (scan.strip() and cis_block.strip()))
+    write_btn = st.button("✅ Записать [CIS] в description", disabled=not (normalize_scan(scan) and cis_block.strip()))
 
-# ----- Actions -----
+
 if find_btn:
-    value = scan.strip()
+    value = normalize_scan(scan)
     try:
-        order = find_order(value, show_progress=True)
+        order = find_order(value)
         if not order:
-            st.error("Заказ не найден в МойСклад")
+            st.error("Заказ не найден в МойСклад (в пределах выбранного лимита перебора)")
         else:
             st.success(f"Найден заказ: {order.get('name')} | id={order.get('id')}")
             st.json(order)
@@ -89,12 +103,13 @@ if find_btn:
     except Exception as e:
         st.exception(e)
 
+
 if write_btn:
-    value = scan.strip()
+    value = normalize_scan(scan)
     try:
-        order = find_order(value, show_progress=True)
+        order = find_order(value)
         if not order:
-            st.error("Заказ не найден в МойСклад")
+            st.error("Заказ не найден в МойСклад (в пределах выбранного лимита перебора)")
             st.stop()
 
         order_id = order["id"]
@@ -107,7 +122,6 @@ if write_btn:
         updated = ms.append_to_customerorder_description(order_id, block)
         st.success("Записал коды в customerorder.description ✅")
 
-        # покажем кусок description
         st.write("Описание (кусок):")
         st.code((updated.get("description") or "")[:2000])
 
