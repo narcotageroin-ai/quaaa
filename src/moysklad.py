@@ -59,12 +59,18 @@ class MoySkladClient:
         return rows[0]
 
     def _get_customerorder_attr_href_by_name(self, attr_name: str) -> Optional[str]:
-        meta = self.get("/entity/customerorder/metadata")
-        attrs = meta.get("attributes") or []
-        for a in attrs:
-            if str(a.get("name", "")).strip() == attr_name.strip():
-                return (a.get("meta") or {}).get("href")
-        return None
+    meta = self.get("/entity/customerorder/metadata")
+    attrs = meta.get("attributes") or []
+    for a in attrs:
+        if not isinstance(a, dict):
+            continue
+        name = str(a.get("name", "")).strip()
+        if name == attr_name.strip():
+            m = a.get("meta") or {}
+            href = m.get("href")
+            return href
+    return None
+
 
     def find_customerorder_by_attr_value(
         self, attr_name: str, value: str
