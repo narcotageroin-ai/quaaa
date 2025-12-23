@@ -32,6 +32,8 @@ class MoySkladClient:
         )
         return request_json("PUT", url, headers=self._headers(), json_body=body)
 
+    # ---------- CustomerOrder search ----------
+
     def find_customerorder_by_name(self, order_name: str) -> Optional[Dict[str, Any]]:
         order_name = order_name.strip()
         if not order_name:
@@ -39,7 +41,7 @@ class MoySkladClient:
 
         safe = order_name.replace('"', '\\"')
 
-        # 1) точное совпадение по name
+        # 1) exact match by name
         page = self.get(
             "/entity/customerorder",
             params={"limit": 100, "filter": f'name="{safe}"'},
@@ -61,45 +63,66 @@ class MoySkladClient:
         rows.sort(key=lambda r: r.get("moment", ""), reverse=True)
         return rows[0]
 
-    def _get_customerorder_attr_href_by_name(self, attr_name: str) -> Optional[str]:
-        meta = self.get("/entity/customerorder/metadata")
+    # ---------- Attributes helpers (robust) ----------
+
+    @staticmethod
+    def _norm_name(s: str) -> str:
+        # lower + remove spaces
+        return "".join((s or "").strip().lower().split())
+
+    def _get_attr_href_by_name(self, entity: str, attr_name: str) -> Optional[str]:
+        """
+        Returns attribute meta.href for entity metadata by attribute display name.
+        Robust: ignores spaces/case, and has fallback 'contains' match.
+        """
+        target = self._norm_name(attr_name)
+        if not target:
+            return None
+
+        meta = self.get(f"/entity/{entity}/metadata")
         attrs = meta.get("attributes") or []
 
+        # 1) exact match (normalized)
         for a in attrs:
             if not isinstance(a, dict):
                 continue
+            name = str(a.get("name", ""))
+            if self._norm_name(name) == target:
+                return (a.get("meta") or {}).get("href")
 
-            name = str(a.get("name", "")).strip()
-            if name == attr_name.strip():
-                m = a.get("meta") or {}
-                return m.get("href")
+        # 2) fallback: contains (normalized)
+        for a in attrs:
+            if not isinstance(a, dict):
+                continue
+            name = str(a.get("name", ""))
+            if target in self._norm_name(name):
+                return (a.get("meta") or {}).get("href")
 
         return None
 
-    def find_customerorder_by_attr_value(
-        self, attr_name: str, value: str
-    ) -> Optional[Dict[str, Any]]:
-        href = self._get_customerorder_attr_href_by_name(attr_name)
+    def find_entity_by_attr_value(self, entity: str, attr_name: str, value: str) -> Optional[Dict[str, Any]]:
+        """
+        Find entity row by custom attribute value.
+        Works by resolving attribute meta.href and using it in filter.
+        """
+        href = self._get_attr_href_by_name(entity, attr_name)
         if not href:
-            # сделаем понятнее, чтобы не гадать
-            raise RuntimeError(f"Не найден атрибут customerorder: {attr_name}")
+            return None
 
-        value = value.strip()
+        value = (value or "").strip()
         if not value:
             return None
 
-        # МС иногда чувствителен к кавычкам, поэтому пробуем оба варианта
+        # MS can be picky: try both quoted and unquoted
         for expr in (f'{href}="{value}"', f"{href}={value}"):
-            page = self.get(
-                "/entity/customerorder",
-                params={"limit": 100, "filter": expr},
-            )
+            page = self.get(f"/entity/{entity}", params={"limit": 100, "filter": expr})
             rows = page.get("rows", []) or []
             if rows:
                 rows.sort(key=lambda r: r.get("moment", ""), reverse=True)
                 return rows[0]
-
         return None
+
+    # ---------- CustomerOrder details/update ----------
 
     def get_customerorder_full(self, order_id: str) -> Dict[str, Any]:
         return self.get(
@@ -114,10 +137,26 @@ class MoySkladClient:
         )
         return (bundle.get("components") or {}).get("rows") or []
 
-    def update_customerorder_description(
-        self, order_id: str, new_description: str
-    ) -> Any:
+    def update_customerorder_description(self, order_id: str, new_description: str) -> Any:
         return self.put(
             f"/entity/customerorder/{order_id}",
             {"description": new_description},
         )
+
+    # ---------- Debug helpers ----------
+
+    def list_entity_attributes(self, entity: str) -> List[Dict[str, Any]]:
+        meta = self.get(f"/entity/{entity}/metadata")
+        attrs = meta.get("attributes") or []
+        out: List[Dict[str, Any]] = []
+        for a in attrs:
+            if not isinstance(a, dict):
+                continue
+            out.append(
+                {
+                    "name": a.get("name"),
+                    "type": a.get("type"),
+                    "href": (a.get("meta") or {}).get("href"),
+                }
+            )
+        return out
