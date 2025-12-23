@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, List
+from datetime import datetime
 
 import requests
 
@@ -32,6 +33,21 @@ def request_json(
     return resp.json()
 
 
+def parse_ms_dt(s: str) -> Optional[datetime]:
+    """
+    MS возвращает 'YYYY-MM-DD HH:MM:SS.mmm' или 'YYYY-MM-DD HH:MM:SS'
+    """
+    if not s:
+        return None
+    s = str(s).strip()
+    for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S"):
+        try:
+            return datetime.strptime(s, fmt)
+        except Exception:
+            pass
+    return None
+
+
 @dataclass
 class MoySkladClient:
     token: str
@@ -58,38 +74,25 @@ class MoySkladClient:
     # ---------------- CustomerOrder ----------------
 
     def get_customerorder(self, order_id: str) -> Dict[str, Any]:
-        """
-        Полное чтение заказа (тут attributes точно есть).
-        """
         order_id = (order_id or "").strip()
         if not order_id:
             raise ValueError("order_id is empty")
         return self.get(f"/entity/customerorder/{order_id}")
 
     def list_customerorders_page(self, limit: int, offset: int) -> List[Dict[str, Any]]:
-        """
-        Список последних заказов. ВАЖНО: attributes тут могут НЕ приходить.
-        """
         page = self.get("/entity/customerorder", params={"limit": limit, "offset": offset, "order": "moment,desc"})
         return page.get("rows", []) if isinstance(page, dict) else []
 
     @staticmethod
     def _attr_match_full(order_full: Dict[str, Any], attr_id: str, attr_name: str, value: str) -> bool:
-        """
-        Проверка attributes[] внутри полного заказа.
-        """
         attrs = order_full.get("attributes") or []
         for a in attrs:
-            v = str(a.get("value", "")).strip()
-            if v != value:
+            if str(a.get("value", "")).strip() != value:
                 continue
-
             if attr_id and str(a.get("id", "")).strip() == attr_id:
                 return True
-
             if attr_name and str(a.get("name", "")).strip() == attr_name:
                 return True
-
         return False
 
     def find_customerorder_by_attr_value_recent(
@@ -99,12 +102,14 @@ class MoySkladClient:
         attr_name: str = "",
         limit_total: int = 800,
         page_size: int = 100,
+        date_from: str = "",  # 'YYYY-MM-DD' или 'YYYY-MM-DD HH:MM:SS'
         progress_cb=None,
     ) -> Optional[Dict[str, Any]]:
         """
-        ГАРАНТИРОВАННЫЙ поиск:
-        1) берём последние N заказов списком
-        2) по каждому делаем GET /customerorder/{id} и проверяем attributes
+        Быстрый и гарантированный поиск:
+        - берём последние заказы (moment desc)
+        - стопаемся, когда moment < date_from (если date_from задан)
+        - дочитываем каждый заказ по id и сравниваем attributes
         """
         value = (value or "").strip()
         attr_id = (attr_id or "").strip()
@@ -112,12 +117,18 @@ class MoySkladClient:
         if not value:
             return None
 
+        date_from_dt = None
+        if date_from:
+            df = date_from.strip()
+            if len(df) == 10:
+                df = df + " 00:00:00"
+            date_from_dt = parse_ms_dt(df)
+
         offset = 0
         scanned = 0
 
         def _progress():
             if progress_cb:
-                # единый контракт: (scanned, total, offset)
                 progress_cb(scanned, limit_total, offset)
 
         _progress()
@@ -128,14 +139,27 @@ class MoySkladClient:
             if not rows:
                 break
 
+            # ранний stop по дате (moment desc => дальше только старее)
+            if date_from_dt:
+                last_moment = parse_ms_dt(rows[-1].get("moment", ""))
+                if last_moment and last_moment < date_from_dt:
+                    # всё что дальше будет ещё старее — смысла листать нет
+                    # но в этой пачке могут быть и свежие, так что всё равно пройдём по каждой записи ниже
+                    pass
+
             for co in rows:
                 if scanned >= limit_total:
                     break
-                scanned += 1
 
+                if date_from_dt:
+                    m = parse_ms_dt(co.get("moment", ""))
+                    if m and m < date_from_dt:
+                        _progress()
+                        return None  # дальше будут только старые
+
+                scanned += 1
                 oid = co.get("id")
                 if not oid:
-                    _progress()
                     continue
 
                 full = self.get_customerorder(oid)
@@ -152,9 +176,6 @@ class MoySkladClient:
         return None
 
     def append_to_customerorder_description(self, order_id: str, text_to_append: str) -> Dict[str, Any]:
-        """
-        Дописываем в customerorder.description.
-        """
         cur = self.get_customerorder(order_id)
         desc = cur.get("description") or ""
         add = (text_to_append or "").strip()
