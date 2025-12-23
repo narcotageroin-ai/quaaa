@@ -4,7 +4,7 @@ import streamlit as st
 from src.moysklad import MoySkladClient, HttpError
 
 st.set_page_config(page_title="CIS Scanner → МойСклад", layout="centered")
-st.write("BUILD:", "2025-12-23 DATE-FROM-FAST")
+st.write("BUILD:", "2025-12-23 DATE-FROM-FAST-FIX")
 st.title("Сканер маркировки (DataMatrix) → МойСклад (customerorder.description)")
 
 with st.sidebar:
@@ -56,7 +56,7 @@ def find_order(value: str):
     def cb(scanned: int, total: int, offset: int):
         pct = int(min(100, (scanned / total) * 100)) if total else 100
         prog.progress(pct, text=f"Проверено {scanned}/{total} заказов (offset={offset})")
-        status.write(f"Проверено: {scanned} / {total} | offset={offset} | date_from={date_from}")
+        status.write(f"Проверено: {scanned}/{total} | offset={offset} | date_from={date_from}")
 
     order = ms.find_customerorder_by_attr_value_recent(
         value=value,
