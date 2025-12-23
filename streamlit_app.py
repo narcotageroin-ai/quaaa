@@ -47,7 +47,15 @@ if load_btn:
         st.stop()
 
     with st.spinner("Ищу заказ в МойСклад..."):
-        row = ms.find_customerorder_by_name(order_name.strip())
+       from src.http import HttpError  # добавь импорт сверху
+
+try:
+    row = ms.find_customerorder_by_name(order_name.strip())
+except HttpError as e:
+    st.error(f"Ошибка МойСклад: HTTP {e.status}")
+    st.json(e.payload)
+    st.stop()
+
     if not row:
         st.error("Заказ не найден по name. Проверьте номер (customerorder.name).")
         st.stop()
