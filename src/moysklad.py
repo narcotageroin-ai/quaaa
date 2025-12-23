@@ -42,3 +42,27 @@ class MoySkladClient:
 
     def update_customerorder_description(self, order_id: str, new_description: str) -> Any:
         return self.put(f"/entity/customerorder/{order_id}", {"description": new_description})
+        def _get_customerorder_attr_href_by_name(self, attr_name: str) -> Optional[str]:
+        meta = self.get("/entity/customerorder/metadata")
+        attrs = meta.get("attributes") or []
+        for a in attrs:
+            if str(a.get("name", "")).strip() == attr_name.strip():
+                m = a.get("meta") or {}
+                href = m.get("href")
+                return href
+        return None
+
+    def find_customerorder_by_attr_value(self, attr_name: str, value: str) -> Optional[Dict[str, Any]]:
+        href = self._get_customerorder_attr_href_by_name(attr_name)
+        if not href:
+            return None
+
+        value = value.strip()
+        # Пробуем 2 варианта (МС иногда любит кавычки для строк)
+        for expr in (f"{href}={value}", f'{href}="{value}"'):
+            page = self.get("/entity/customerorder", params={"limit": 100, "filter": expr})
+            rows = page.get("rows", []) or []
+            if rows:
+                rows.sort(key=lambda r: r.get("moment", ""), reverse=True)
+                return rows[0]
+        return None
