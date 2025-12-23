@@ -1,6 +1,5 @@
 from typing import Any, Dict, List, Optional
 from urllib.parse import urljoin
-from datetime import datetime, timedelta
 
 from src.http import request_json
 
@@ -33,7 +32,7 @@ class MoySkladClient:
         )
         return request_json("PUT", url, headers=self._headers(), json_body=body)
 
-    # ---------- CustomerOrder basic ----------
+    # ---------- CustomerOrder ----------
 
     def find_customerorder_by_name(self, order_name: str) -> Optional[Dict[str, Any]]:
         order_name = (order_name or "").strip()
@@ -62,11 +61,12 @@ class MoySkladClient:
         rows.sort(key=lambda r: r.get("moment", ""), reverse=True)
         return rows[0]
 
-    def list_customerorders(self, limit: int = 100, offset: int = 0, filter_expr: Optional[str] = None) -> Dict[str, Any]:
-        params: Dict[str, Any] = {"limit": limit, "offset": offset}
-        if filter_expr:
-            params["filter"] = filter_expr
-        return self.get("/entity/customerorder", params=params)
+    def list_customerorders(self, limit: int = 100, offset: int = 0) -> Dict[str, Any]:
+        # Важно: order=moment,desc — чтобы идти от самых свежих
+        return self.get(
+            "/entity/customerorder",
+            params={"limit": limit, "offset": offset, "order": "moment,desc"},
+        )
 
     def get_customerorder_full(self, order_id: str) -> Dict[str, Any]:
         return self.get(
@@ -87,7 +87,7 @@ class MoySkladClient:
         )
         return (bundle.get("components") or {}).get("rows") or []
 
-    # ---------- Find by attribute href/value (fast + brute force fallback) ----------
+    # ---------- Find by attribute href/value ----------
 
     @staticmethod
     def _attr_value_matches(attr: Dict[str, Any], attr_href: str, value: str) -> bool:
@@ -103,7 +103,7 @@ class MoySkladClient:
         if not attr_href or not value:
             return None
 
-        # Try server-side filter (fast)
+        # быстрый серверный фильтр
         for expr in (f'{attr_href}="{value}"', f"{attr_href}={value}"):
             page = self.get("/entity/customerorder", params={"limit": 50, "filter": expr})
             rows = page.get("rows", []) or []
@@ -116,28 +116,23 @@ class MoySkladClient:
         self,
         attr_href: str,
         value: str,
-        max_orders: int = 500,
-        days_back: int = 30,
+        max_orders: int = 800,
     ) -> Optional[Dict[str, Any]]:
         """
-        Guaranteed method: scan last N orders (optionally by moment >= now-days_back),
-        load full order and compare attributes.
+        Железобетон: берём последние N заказов (moment desc), читаем каждый и сравниваем атрибут.
+        Без фильтров по датам, чтобы не упираться в нюансы moment-фильтрации.
         """
         attr_href = (attr_href or "").strip()
         value = (value or "").strip()
         if not attr_href or not value:
             return None
 
-        date_from = (datetime.now() - timedelta(days=days_back)).strftime("%Y-%m-%d %H:%M:%S")
-        # MS moment filter supports >= in some contexts; if not, we still have N cap
-        filter_expr = f"moment>={date_from}"
-
         scanned = 0
         offset = 0
-        limit = 100
+        limit = 50  # чтобы не бить API слишком жестко
 
         while scanned < max_orders:
-            page = self.list_customerorders(limit=limit, offset=offset, filter_expr=filter_expr)
+            page = self.list_customerorders(limit=limit, offset=offset)
             rows = page.get("rows", []) or []
             if not rows:
                 break
@@ -148,6 +143,7 @@ class MoySkladClient:
                 oid = r.get("id")
                 if not oid:
                     continue
+
                 scanned += 1
                 full = self.get_customerorder_full(oid)
                 attrs = full.get("attributes") or []
