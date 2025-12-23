@@ -105,9 +105,9 @@ ms = MoySkladClient(
 # DEBUG кнопка — покажет, как API реально видит атрибуты customerorder
 with st.sidebar:
     st.divider()
-    if st.button("DEBUG: атрибуты (customerorder/demand/saleschannelorder)"):
+    if st.button("DEBUG: атрибуты (customerorder/demand/invoiceout)"):
         try:
-            entities = ["customerorder", "demand", "saleschannelorder"]
+            entities = ["customerorder", "demand", "invoiceout"]
             result = {}
             for ent in entities:
                 meta = ms.get(f"/entity/{ent}/metadata")
@@ -126,6 +126,7 @@ with st.sidebar:
             st.error(f"HTTP {e.status}")
             st.json(e.payload)
         st.stop()
+
 
 
 
