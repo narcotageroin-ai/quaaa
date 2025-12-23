@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, List
+from typing import Any, Dict, Optional, List, Tuple
 
 import requests
 
@@ -39,7 +39,7 @@ class MoySkladClient:
 
     def _headers(self) -> Dict[str, str]:
         auth = (self.token or "").strip()
-        # токен может прийти уже с "Bearer " или "Basic "
+        # token может прийти уже с "Bearer " или "Basic "
         if not (auth.lower().startswith("bearer ") or auth.lower().startswith("basic ")):
             auth = f"Bearer {auth}"
 
@@ -59,57 +59,74 @@ class MoySkladClient:
 
     # ---------------- CustomerOrder ----------------
 
-    def find_customerorder_by_attr_id_value(self, attr_id: str, value: str) -> Optional[Dict[str, Any]]:
-        """
-        Ищем заказ покупателя по значению доп.поля.
-        Самый надёжный вариант для МС: filter=attributes.<attr_id>=<value>
-        """
-        attr_id = (attr_id or "").strip()
-        value = (value or "").strip()
-        if not attr_id or not value:
-            return None
-
-        flt = f"attributes.{attr_id}={value}"
-        page = self.get("/entity/customerorder", params={"limit": 10, "filter": flt, "order": "moment,desc"})
-        rows = page.get("rows", []) if isinstance(page, dict) else []
-        return rows[0] if rows else None
-
     def search_customerorder(self, query: str) -> Optional[Dict[str, Any]]:
         """
-        Фоллбек: общий поиск (может не искать в attributes, но иногда помогает).
+        Фоллбек: общий поиск.
+        Важно: search НЕ гарантирует поиск по attributes, но иногда помогает.
         """
         query = (query or "").strip()
         if not query:
             return None
-        page = self.get("/entity/customerorder", params={"limit": 20, "search": query, "order": "moment,desc"})
+        page = self.get("/entity/customerorder", params={"limit": 50, "search": query, "order": "moment,desc"})
         rows = page.get("rows", []) if isinstance(page, dict) else []
+        # search может вернуть похожие — проверим атрибуты уже в streamlit_app
         return rows[0] if rows else None
 
     def list_customerorders_page(self, limit: int, offset: int) -> List[Dict[str, Any]]:
         page = self.get("/entity/customerorder", params={"limit": limit, "offset": offset, "order": "moment,desc"})
         return page.get("rows", []) if isinstance(page, dict) else []
 
-    def find_customerorder_by_attr_bruteforce_recent(
+    @staticmethod
+    def _attr_match(a: Dict[str, Any], attr_id: str, attr_name: str, value: str) -> bool:
+        """
+        Проверка одного элемента attributes[] на совпадение.
+        """
+        v = str(a.get("value", "")).strip()
+        if v != value:
+            return False
+
+        if attr_id:
+            if str(a.get("id", "")).strip() == attr_id:
+                return True
+            # иногда id нет, но есть meta.href — тоже можем извлечь
+            meta = a.get("meta") or {}
+            href = str(meta.get("href", "")).strip()
+            if href.endswith(f"/{attr_id}"):
+                return True
+
+        if attr_name:
+            if str(a.get("name", "")).strip() == attr_name:
+                return True
+
+        return False
+
+    def find_customerorder_by_attr_value_recent(
         self,
-        attr_name: str,
         value: str,
-        limit_total: int = 2000,
+        attr_id: str = "",
+        attr_name: str = "",
+        limit_total: int = 5000,
         page_size: int = 200,
+        progress_cb=None,
     ) -> Optional[Dict[str, Any]]:
         """
-        Железобетонный фоллбек:
-        берём последние N заказов и сравниваем attributes[].name/value (в кратком объекте rows).
+        Рабочий способ для МС: перебор последних заказов и поиск по attributes[].
+
+        progress_cb: функция(progress:int, scanned:int, limit_total:int, offset:int)
         """
-        attr_name = (attr_name or "").strip()
         value = (value or "").strip()
-        if not attr_name or not value:
+        attr_id = (attr_id or "").strip()
+        attr_name = (attr_name or "").strip()
+
+        if not value:
             return None
 
         offset = 0
         scanned = 0
 
         while scanned < limit_total:
-            rows = self.list_customerorders_page(limit=min(page_size, limit_total - scanned), offset=offset)
+            take = min(page_size, limit_total - scanned)
+            rows = self.list_customerorders_page(limit=take, offset=offset)
             if not rows:
                 break
 
@@ -117,13 +134,19 @@ class MoySkladClient:
                 scanned += 1
                 attrs = co.get("attributes") or []
                 for a in attrs:
-                    if str(a.get("name", "")).strip() == attr_name and str(a.get("value", "")).strip() == value:
+                    if self._attr_match(a, attr_id=attr_id, attr_name=attr_name, value=value):
                         return co
+
+                if progress_cb and scanned % 50 == 0:
+                    progress_cb(scanned, limit_total, offset)
 
                 if scanned >= limit_total:
                     break
 
             offset += len(rows)
+
+            if progress_cb:
+                progress_cb(scanned, limit_total, offset)
 
         return None
 
