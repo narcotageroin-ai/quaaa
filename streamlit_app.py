@@ -4,7 +4,7 @@ import streamlit as st
 from src.moysklad import MoySkladClient, HttpError
 
 st.set_page_config(page_title="CIS Scanner → МойСклад", layout="centered")
-st.write("BUILD:", "2025-12-23 FULL-GET-SCAN")
+st.write("BUILD:", "2025-12-23 FULL-GET-SCAN-FIXCB")
 st.title("Сканер маркировки (DataMatrix) → МойСклад (customerorder.description)")
 
 with st.sidebar:
@@ -48,10 +48,10 @@ def find_order(value: str):
     prog = st.progress(0, text="Ищу заказ (читаю последние заказы и дочитываю каждый по id)...")
     status = st.empty()
 
-    def cb(scanned: int, total: int):
-        pct = int(min(100, (scanned / total) * 100))
-        prog.progress(pct, text=f"Проверено {scanned}/{total} заказов (GET каждого заказа по id)")
-        status.write(f"Проверено: {scanned} / {total}")
+    def cb(scanned: int, total: int, offset: int):
+        pct = int(min(100, (scanned / total) * 100)) if total else 100
+        prog.progress(pct, text=f"Проверено {scanned}/{total} заказов (offset={offset})")
+        status.write(f"Проверено: {scanned} / {total} | offset={offset}")
 
     order = ms.find_customerorder_by_attr_value_recent(
         value=value,
@@ -72,13 +72,13 @@ if find_btn:
             st.error("Заказ не найден (в пределах выбранного лимита последних заказов)")
         else:
             st.success(f"Найден заказ: {order.get('name')} | id={order.get('id')}")
-            st.json({
-                "id": order.get("id"),
-                "name": order.get("name"),
-                "moment": order.get("moment"),
-                "state": (order.get("state") or {}).get("meta", {}),
-                "shk128": next((a.get("value") for a in (order.get("attributes") or []) if a.get("id") == qr_attr_id.strip()), None),
-            })
+            # выведем контрольное значение ШККОД128
+            shk = None
+            for a in (order.get("attributes") or []):
+                if str(a.get("id", "")).strip() == qr_attr_id.strip() or str(a.get("name", "")).strip() == qr_attr_name.strip():
+                    shk = a.get("value")
+                    break
+            st.json({"name": order.get("name"), "id": order.get("id"), "moment": order.get("moment"), "ШККОД128": shk})
     except HttpError as e:
         st.error(f"Ошибка МойСклад: HTTP {e.status}")
         st.json(e.payload)
