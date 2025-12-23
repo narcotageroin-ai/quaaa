@@ -4,7 +4,7 @@ import streamlit as st
 from src.moysklad import MoySkladClient, HttpError
 
 st.set_page_config(page_title="CIS Scanner → МойСклад", layout="centered")
-st.write("BUILD:", "2025-12-23 FULL-GET-SCAN-FIXCB")
+st.write("BUILD:", "2025-12-23 DATE-FROM-FAST")
 st.title("Сканер маркировки (DataMatrix) → МойСклад (customerorder.description)")
 
 with st.sidebar:
@@ -20,8 +20,13 @@ with st.sidebar:
         value=st.secrets.get("MS_ORDER_QR_ATTR_NAME", "ШККОД128"),
     )
 
-    limit_total = st.number_input("Сколько последних заказов проверить", min_value=50, max_value=5000, value=int(st.secrets.get("LIMIT_TOTAL", 800)))
-    page_size = st.number_input("Размер пачки (страницы)", min_value=20, max_value=500, value=int(st.secrets.get("PAGE_SIZE", 100)))
+    date_from = st.text_input(
+        "Искать заказы после даты (YYYY-MM-DD)",
+        value=st.secrets.get("DATE_FROM", "2025-12-20"),
+    )
+
+    limit_total = st.number_input("Макс. сколько заказов проверить", min_value=50, max_value=5000, value=int(st.secrets.get("LIMIT_TOTAL", 600)))
+    page_size = st.number_input("Размер пачки (страницы)", min_value=20, max_value=500, value=int(st.secrets.get("PAGE_SIZE", 120)))
 
 if not ms_token.strip():
     st.warning("Укажи MS_TOKEN в сайдбаре.")
@@ -45,13 +50,13 @@ with col2:
 
 
 def find_order(value: str):
-    prog = st.progress(0, text="Ищу заказ (читаю последние заказы и дочитываю каждый по id)...")
+    prog = st.progress(0, text="Ищу заказ (беру свежие заказы и дочитываю каждый по id)...")
     status = st.empty()
 
     def cb(scanned: int, total: int, offset: int):
         pct = int(min(100, (scanned / total) * 100)) if total else 100
         prog.progress(pct, text=f"Проверено {scanned}/{total} заказов (offset={offset})")
-        status.write(f"Проверено: {scanned} / {total} | offset={offset}")
+        status.write(f"Проверено: {scanned} / {total} | offset={offset} | date_from={date_from}")
 
     order = ms.find_customerorder_by_attr_value_recent(
         value=value,
@@ -59,6 +64,7 @@ def find_order(value: str):
         attr_name=qr_attr_name.strip(),
         limit_total=int(limit_total),
         page_size=int(page_size),
+        date_from=date_from.strip(),
         progress_cb=cb,
     )
     prog.progress(100, text="Готово")
@@ -69,10 +75,9 @@ if find_btn:
     try:
         order = find_order(scan_val)
         if not order:
-            st.error("Заказ не найден (в пределах выбранного лимита последних заказов)")
+            st.error("Заказ не найден (в пределах выбранных ограничений)")
         else:
             st.success(f"Найден заказ: {order.get('name')} | id={order.get('id')}")
-            # выведем контрольное значение ШККОД128
             shk = None
             for a in (order.get("attributes") or []):
                 if str(a.get("id", "")).strip() == qr_attr_id.strip() or str(a.get("name", "")).strip() == qr_attr_name.strip():
@@ -90,7 +95,7 @@ if write_btn:
     try:
         order = find_order(scan_val)
         if not order:
-            st.error("Заказ не найден (в пределах выбранного лимита последних заказов)")
+            st.error("Заказ не найден (в пределах выбранных ограничений)")
             st.stop()
 
         order_id = order["id"]
