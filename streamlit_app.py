@@ -9,7 +9,7 @@ from src.cis_logic import normalize_codes, replace_cis_block
 
 
 st.set_page_config(page_title="CIS Scanner", layout="wide")
-st.write("BUILD:", "2025-12-23 QR-FIND")
+st.write("BUILD:", "2025-12-23 QR-ATTR-FIND")
 st.title("Сканер маркировки (DataMatrix) → МойСклад (customerorder.description)")
 
 
@@ -46,16 +46,10 @@ def load_order(ms: MoySkladClient, settings: Settings, query: str) -> None:
         st.stop()
 
     try:
-        # 1) сначала пробуем по QR-атрибуту (ШККОД128)
-        row = None
-        try:
-            row = ms.find_customerorder_by_attr_value(settings.MS_ORDER_QR_ATTR_NAME, query)
-        except RuntimeError as e:
-            # если атрибут не найден — покажем нормально и стопнем
-            st.error(str(e))
-            st.stop()
+        # 1) try QR attribute in customerorder
+        row = ms.find_entity_by_attr_value("customerorder", settings.MS_ORDER_QR_ATTR_NAME, query)
 
-        # 2) если не нашли по QR — пробуем по номеру заказа
+        # 2) fallback: by customerorder.name
         if not row:
             row = ms.find_customerorder_by_name(query)
 
@@ -103,14 +97,25 @@ with st.sidebar:
 
     dry_run = st.toggle("Dry run (не записывать в МС)", value=False)
 
-
 ms = MoySkladClient(
     base_url=settings.MS_BASE_URL,
     token=settings.ms_auth_header(),
 )
 
+# DEBUG кнопка — покажет, как API реально видит атрибуты customerorder
+with st.sidebar:
+    st.divider()
+    if st.button("Показать атрибуты customerorder (debug)"):
+        try:
+            attrs = ms.list_entity_attributes("customerorder")
+            st.json(attrs)
+        except HttpError as e:
+            st.error(f"HTTP {e.status}")
+            st.json(e.payload)
+        st.stop()
 
-st.markdown("### Сканируй QR из oShip (ШККОД128) или введи номер заказа")
+
+st.markdown("### Сканируй QR из oShip (значение из доп.поля) или введи номер заказа")
 
 with st.form("scan_form", clear_on_submit=False):
     scan_value = st.text_input(
