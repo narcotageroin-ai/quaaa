@@ -34,9 +34,6 @@ def request_json(
 
 
 def parse_ms_dt(s: str) -> Optional[datetime]:
-    """
-    MS возвращает 'YYYY-MM-DD HH:MM:SS.mmm' или 'YYYY-MM-DD HH:MM:SS'
-    """
     if not s:
         return None
     s = str(s).strip()
@@ -103,13 +100,13 @@ class MoySkladClient:
         limit_total: int = 800,
         page_size: int = 100,
         date_from: str = "",  # 'YYYY-MM-DD' или 'YYYY-MM-DD HH:MM:SS'
-        progress_cb=None,
+        progress_cb=None,     # progress_cb(scanned, total, offset)
     ) -> Optional[Dict[str, Any]]:
         """
-        Быстрый и гарантированный поиск:
-        - берём последние заказы (moment desc)
-        - стопаемся, когда moment < date_from (если date_from задан)
-        - дочитываем каждый заказ по id и сравниваем attributes
+        ГАРАНТИРОВАННЫЙ поиск:
+        - берём последние N заказов (moment desc)
+        - при date_from: стопаемся когда moment < date_from (дальше будут только старее)
+        - по каждому делаем GET /customerorder/{id} и проверяем attributes
         """
         value = (value or "").strip()
         attr_id = (attr_id or "").strip()
@@ -139,23 +136,16 @@ class MoySkladClient:
             if not rows:
                 break
 
-            # ранний stop по дате (moment desc => дальше только старее)
-            if date_from_dt:
-                last_moment = parse_ms_dt(rows[-1].get("moment", ""))
-                if last_moment and last_moment < date_from_dt:
-                    # всё что дальше будет ещё старее — смысла листать нет
-                    # но в этой пачке могут быть и свежие, так что всё равно пройдём по каждой записи ниже
-                    pass
-
             for co in rows:
                 if scanned >= limit_total:
                     break
 
+                # ранний stop по дате
                 if date_from_dt:
                     m = parse_ms_dt(co.get("moment", ""))
                     if m and m < date_from_dt:
                         _progress()
-                        return None  # дальше будут только старые
+                        return None
 
                 scanned += 1
                 oid = co.get("id")
