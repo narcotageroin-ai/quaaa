@@ -45,7 +45,7 @@ def calc_expected_cis_units(
                     continue
 
                 c_full = ms.get(c_href, params={"expand": "attributes"})
-                need = bundle_marked or bool(_get_attr_bool(c_full, attr_cis_required) or False)
+                need = True
                 units = qty * c_qty
 
                 lines.append({
