@@ -105,23 +105,28 @@ ms = MoySkladClient(
 # DEBUG кнопка — покажет, как API реально видит атрибуты customerorder
 with st.sidebar:
     st.divider()
-    if st.button("Показать атрибуты customerorder (debug)"):
+    if st.button("DEBUG: атрибуты (customerorder/demand/saleschannelorder)"):
         try:
-            meta = ms.get("/entity/customerorder/metadata")
-            attrs = meta.get("attributes") or []
-            out = []
-            for a in attrs:
-                if isinstance(a, dict):
-                    out.append({
-                        "name": a.get("name"),
-                        "type": a.get("type"),
-                        "href": (a.get("meta") or {}).get("href"),
-                    })
-            st.json(out)
+            entities = ["customerorder", "demand", "saleschannelorder"]
+            result = {}
+            for ent in entities:
+                meta = ms.get(f"/entity/{ent}/metadata")
+                attrs = meta.get("attributes") or []
+                out = []
+                for a in attrs:
+                    if isinstance(a, dict):
+                        out.append({
+                            "name": a.get("name"),
+                            "type": a.get("type"),
+                            "href": (a.get("meta") or {}).get("href"),
+                        })
+                result[ent] = out
+            st.json(result)
         except HttpError as e:
             st.error(f"HTTP {e.status}")
             st.json(e.payload)
         st.stop()
+
 
 
 st.markdown("### Сканируй QR из oShip (значение из доп.поля) или введи номер заказа")
