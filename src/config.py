@@ -6,6 +6,7 @@ class Settings(BaseModel):
     MS_ATTR_CIS_REQUIRED: str = Field(default="ЧЗ")
     MS_BUNDLE_MARK_FLAG: str = Field(default="Комплект_маркируемый")
     MAX_COMPONENT_FETCH: int = Field(default=200)
+    MS_ORDER_QR_ATTR_NAME: str = Field(default="ШККОД128")
 
     def ms_auth_header(self) -> str:
         t = self.MS_TOKEN.strip()
