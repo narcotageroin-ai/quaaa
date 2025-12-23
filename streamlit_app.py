@@ -9,7 +9,7 @@ from src.cis_logic import normalize_codes, replace_cis_block
 
 
 st.set_page_config(page_title="CIS Scanner", layout="wide")
-st.write("BUILD:", "2025-12-23 ATTR-HREF")
+st.write("BUILD:", "2025-12-23 ATTR-HREF-ROBUST")
 st.title("Сканер маркировки (DataMatrix) → МойСклад (customerorder.description)")
 
 
@@ -26,8 +26,7 @@ def load_settings() -> Settings:
         "MS_TOKEN",
         "MS_ATTR_CIS_REQUIRED",
         "MS_BUNDLE_MARK_FLAG",
-        "MS_ORDER_QR_ATTR_NAME",   # оставим как fallback
-        "MS_ORDER_QR_ATTR_HREF",   # главный способ
+        "MS_ORDER_QR_ATTR_HREF",
         "MAX_COMPONENT_FETCH",
     ]
     for k in keys:
@@ -46,12 +45,10 @@ def load_order(ms: MoySkladClient, settings: Settings, query: str) -> None:
     try:
         row = None
 
-        # 1) Главный способ: поиск по href атрибута (самый надежный)
-        attr_href = getattr(settings, "MS_ORDER_QR_ATTR_HREF", "") or ""
-        if attr_href.strip():
+        attr_href = (getattr(settings, "MS_ORDER_QR_ATTR_HREF", "") or "").strip()
+        if attr_href:
             row = ms.find_customerorder_by_attr_href_value(attr_href, query)
 
-        # 2) Fallback: по номеру заказа
         if not row:
             row = ms.find_customerorder_by_name(query)
 
