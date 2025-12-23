@@ -38,6 +38,8 @@ class MoySkladClient:
             return None
 
         safe = order_name.replace('"', '\\"')
+
+        # 1) точное совпадение по name
         page = self.get(
             "/entity/customerorder",
             params={"limit": 100, "filter": f'name="{safe}"'},
@@ -47,6 +49,7 @@ class MoySkladClient:
             rows.sort(key=lambda r: r.get("moment", ""), reverse=True)
             return rows[0]
 
+        # 2) fallback: search
         page = self.get(
             "/entity/customerorder",
             params={"limit": 100, "search": order_name},
@@ -59,27 +62,33 @@ class MoySkladClient:
         return rows[0]
 
     def _get_customerorder_attr_href_by_name(self, attr_name: str) -> Optional[str]:
-    meta = self.get("/entity/customerorder/metadata")
-    attrs = meta.get("attributes") or []
-    for a in attrs:
-        if not isinstance(a, dict):
-            continue
-        name = str(a.get("name", "")).strip()
-        if name == attr_name.strip():
-            m = a.get("meta") or {}
-            href = m.get("href")
-            return href
-    return None
+        meta = self.get("/entity/customerorder/metadata")
+        attrs = meta.get("attributes") or []
 
+        for a in attrs:
+            if not isinstance(a, dict):
+                continue
+
+            name = str(a.get("name", "")).strip()
+            if name == attr_name.strip():
+                m = a.get("meta") or {}
+                return m.get("href")
+
+        return None
 
     def find_customerorder_by_attr_value(
         self, attr_name: str, value: str
     ) -> Optional[Dict[str, Any]]:
         href = self._get_customerorder_attr_href_by_name(attr_name)
         if not href:
-            return None
+            # сделаем понятнее, чтобы не гадать
+            raise RuntimeError(f"Не найден атрибут customerorder: {attr_name}")
 
         value = value.strip()
+        if not value:
+            return None
+
+        # МС иногда чувствителен к кавычкам, поэтому пробуем оба варианта
         for expr in (f'{href}="{value}"', f"{href}={value}"):
             page = self.get(
                 "/entity/customerorder",
@@ -89,6 +98,7 @@ class MoySkladClient:
             if rows:
                 rows.sort(key=lambda r: r.get("moment", ""), reverse=True)
                 return rows[0]
+
         return None
 
     def get_customerorder_full(self, order_id: str) -> Dict[str, Any]:
