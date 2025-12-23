@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, List, Tuple
+from typing import Any, Dict, Optional, List
 
 import requests
 
@@ -39,10 +39,8 @@ class MoySkladClient:
 
     def _headers(self) -> Dict[str, str]:
         auth = (self.token or "").strip()
-        # token может прийти уже с "Bearer " или "Basic "
         if not (auth.lower().startswith("bearer ") or auth.lower().startswith("basic ")):
             auth = f"Bearer {auth}"
-
         return {
             "Authorization": auth,
             "Accept": "application/json;charset=utf-8",
@@ -59,43 +57,37 @@ class MoySkladClient:
 
     # ---------------- CustomerOrder ----------------
 
-    def search_customerorder(self, query: str) -> Optional[Dict[str, Any]]:
+    def get_customerorder(self, order_id: str) -> Dict[str, Any]:
         """
-        Фоллбек: общий поиск.
-        Важно: search НЕ гарантирует поиск по attributes, но иногда помогает.
+        Полное чтение заказа (тут attributes точно есть).
         """
-        query = (query or "").strip()
-        if not query:
-            return None
-        page = self.get("/entity/customerorder", params={"limit": 50, "search": query, "order": "moment,desc"})
-        rows = page.get("rows", []) if isinstance(page, dict) else []
-        # search может вернуть похожие — проверим атрибуты уже в streamlit_app
-        return rows[0] if rows else None
+        order_id = (order_id or "").strip()
+        if not order_id:
+            raise ValueError("order_id is empty")
+        return self.get(f"/entity/customerorder/{order_id}")
 
     def list_customerorders_page(self, limit: int, offset: int) -> List[Dict[str, Any]]:
+        """
+        Список последних заказов. ВАЖНО: attributes тут могут НЕ приходить.
+        """
         page = self.get("/entity/customerorder", params={"limit": limit, "offset": offset, "order": "moment,desc"})
         return page.get("rows", []) if isinstance(page, dict) else []
 
     @staticmethod
-    def _attr_match(a: Dict[str, Any], attr_id: str, attr_name: str, value: str) -> bool:
+    def _attr_match_full(order_full: Dict[str, Any], attr_id: str, attr_name: str, value: str) -> bool:
         """
-        Проверка одного элемента attributes[] на совпадение.
+        Проверка attributes[] внутри полного заказа.
         """
-        v = str(a.get("value", "")).strip()
-        if v != value:
-            return False
+        attrs = order_full.get("attributes") or []
+        for a in attrs:
+            v = str(a.get("value", "")).strip()
+            if v != value:
+                continue
 
-        if attr_id:
-            if str(a.get("id", "")).strip() == attr_id:
-                return True
-            # иногда id нет, но есть meta.href — тоже можем извлечь
-            meta = a.get("meta") or {}
-            href = str(meta.get("href", "")).strip()
-            if href.endswith(f"/{attr_id}"):
+            if attr_id and str(a.get("id", "")).strip() == attr_id:
                 return True
 
-        if attr_name:
-            if str(a.get("name", "")).strip() == attr_name:
+            if attr_name and str(a.get("name", "")).strip() == attr_name:
                 return True
 
         return False
@@ -105,19 +97,18 @@ class MoySkladClient:
         value: str,
         attr_id: str = "",
         attr_name: str = "",
-        limit_total: int = 5000,
-        page_size: int = 200,
+        limit_total: int = 800,
+        page_size: int = 100,
         progress_cb=None,
     ) -> Optional[Dict[str, Any]]:
         """
-        Рабочий способ для МС: перебор последних заказов и поиск по attributes[].
-
-        progress_cb: функция(progress:int, scanned:int, limit_total:int, offset:int)
+        ГАРАНТИРОВАННЫЙ поиск:
+        1) берём последние N заказов списком
+        2) по каждому делаем GET /customerorder/{id} и проверяем attributes
         """
         value = (value or "").strip()
         attr_id = (attr_id or "").strip()
         attr_name = (attr_name or "").strip()
-
         if not value:
             return None
 
@@ -131,22 +122,26 @@ class MoySkladClient:
                 break
 
             for co in rows:
-                scanned += 1
-                attrs = co.get("attributes") or []
-                for a in attrs:
-                    if self._attr_match(a, attr_id=attr_id, attr_name=attr_name, value=value):
-                        return co
-
-                if progress_cb and scanned % 50 == 0:
-                    progress_cb(scanned, limit_total, offset)
-
                 if scanned >= limit_total:
                     break
+                scanned += 1
+
+                oid = co.get("id")
+                if not oid:
+                    continue
+
+                # ключевая часть: дочитываем полный заказ
+                full = self.get_customerorder(oid)
+
+                if self._attr_match_full(full, attr_id=attr_id, attr_name=attr_name, value=value):
+                    return full
+
+                if progress_cb and scanned % 20 == 0:
+                    progress_cb(scanned, limit_total)
 
             offset += len(rows)
-
             if progress_cb:
-                progress_cb(scanned, limit_total, offset)
+                progress_cb(scanned, limit_total)
 
         return None
 
@@ -154,14 +149,8 @@ class MoySkladClient:
         """
         Дописываем в customerorder.description.
         """
-        order_id = (order_id or "").strip()
-        if not order_id:
-            raise ValueError("order_id is empty")
-
-        cur = self.get(f"/entity/customerorder/{order_id}")
+        cur = self.get_customerorder(order_id)
         desc = cur.get("description") or ""
         add = (text_to_append or "").strip()
         new_desc = desc + ("\n" if desc and add else "") + add
-
-        payload = {"description": new_desc}
-        return self.put(f"/entity/customerorder/{order_id}", payload)
+        return self.put(f"/entity/customerorder/{order_id}", {"description": new_desc})
