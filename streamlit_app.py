@@ -9,7 +9,7 @@ from src.cis_logic import normalize_codes, replace_cis_block
 
 
 st.set_page_config(page_title="CIS Scanner", layout="wide")
-st.write("BUILD:", "2025-12-23 ATTR-HREF-BRUTEFORCE")
+st.write("BUILD:", "2025-12-23 ATTR-HREF-BRUTEFORCE-V2")
 st.title("Сканер маркировки (DataMatrix) → МойСклад (customerorder.description)")
 
 
@@ -29,7 +29,6 @@ def load_settings() -> Settings:
         "MS_ORDER_QR_ATTR_HREF",
         "MAX_COMPONENT_FETCH",
         "MAX_BRUTEFORCE_ORDERS",
-        "BRUTEFORCE_DAYS_BACK",
     ]
     for k in keys:
         if k not in data and os.getenv(k):
@@ -43,30 +42,28 @@ def load_order(ms: MoySkladClient, settings: Settings, query: str) -> None:
     st.caption(f"DEBUG scan repr: {query!r}")
 
     if not query:
-        st.warning("Отсканируй QR (*Cr9lrVQX) или введи номер заказа (4345577084)")
+        st.warning("Отсканируй QR (*XXXX) или введи номер заказа (4345577084)")
         st.stop()
 
     try:
         row = None
         attr_href = (getattr(settings, "MS_ORDER_QR_ATTR_HREF", "") or "").strip()
 
-        # 1) Fast filter by attribute href
+        # 1) быстрый фильтр
         if attr_href:
             row = ms.find_customerorder_by_attr_href_value_fast(attr_href, query)
 
-        # 2) Bruteforce fallback
+        # 2) железобетонный брютфорс по последним заказам
         if not row and attr_href:
-            max_orders = int(getattr(settings, "MAX_BRUTEFORCE_ORDERS", 500) or 500)
-            days_back = int(getattr(settings, "BRUTEFORCE_DAYS_BACK", 30) or 30)
-            with st.spinner(f"Не найдено быстрым фильтром. Ищу в последних {max_orders} заказах за {days_back} дней..."):
+            max_orders = int(getattr(settings, "MAX_BRUTEFORCE_ORDERS", 800) or 800)
+            with st.spinner(f"Не найдено быстрым фильтром. Ищу в последних {max_orders} заказах..."):
                 row = ms.find_customerorder_by_attr_href_value_bruteforce(
                     attr_href=attr_href,
                     value=query,
                     max_orders=max_orders,
-                    days_back=days_back,
                 )
 
-        # 3) Fallback: by order number
+        # 3) по номеру заказа
         if not row:
             row = ms.find_customerorder_by_name(query)
 
@@ -119,10 +116,10 @@ ms = MoySkladClient(
     token=settings.ms_auth_header(),
 )
 
-st.markdown("### Сканируй QR из oShip (ШККОД128) или введи номер заказа")
+st.markdown("### Сканируй QR из oShip (значение ШККОД128) или введи номер заказа")
 
 with st.form("scan_form", clear_on_submit=False):
-    scan_value = st.text_input("QR / номер заказа", placeholder="*Cr9lrVQX или 4345577084")
+    scan_value = st.text_input("QR / номер заказа", placeholder="*CtzwYRSH или 4345577084")
     submit = st.form_submit_button("Открыть заказ")
 
 if submit:
