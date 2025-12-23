@@ -1,180 +1,96 @@
-import os
+# streamlit_app.py
+from __future__ import annotations
+
 import streamlit as st
 
-from src.http import HttpError
-from src.config import Settings
-from src.moysklad import MoySkladClient
-from src.order_expand import calc_expected_cis_units
-from src.cis_logic import normalize_codes, replace_cis_block
+from src.moysklad import MoySkladClient, HttpError
 
 
-st.set_page_config(page_title="CIS Scanner", layout="wide")
-st.write("BUILD:", "2025-12-23 ATTR-HREF-BRUTEFORCE-V2")
+st.set_page_config(page_title="Сканер маркировки → МойСклад", layout="centered")
+
 st.title("Сканер маркировки (DataMatrix) → МойСклад (customerorder.description)")
 
+# --- Настройки ---
+with st.sidebar:
+    st.header("Настройки")
 
-def load_settings() -> Settings:
-    data = {}
+    ms_token = st.text_input("MS_TOKEN", type="password", value=st.secrets.get("MS_TOKEN", ""))
+    st.caption("Токен МойСклад (Bearer)")
+
+    # ВАЖНО: здесь мы просим именно ID доп.поля, а не имя
+    qr_attr_id = st.text_input(
+        "MS_ORDER_QR_ATTR_ID (ID доп.поля ШККОД128)",
+        value=st.secrets.get("MS_ORDER_QR_ATTR_ID", "687d964c-5a22-11ee-0a80-032800443111"),
+    )
+    qr_attr_name = st.text_input(
+        "MS_ORDER_QR_ATTR_NAME (для bruteforce fallback)",
+        value=st.secrets.get("MS_ORDER_QR_ATTR_NAME", "ШККОД128"),
+    )
+
+    st.divider()
+    st.write("Подсказка: ID можно взять прямо из JSON заказа (ты уже прислал — он известен).")
+
+
+if not ms_token:
+    st.warning("Укажи MS_TOKEN в сайдбаре.")
+    st.stop()
+
+ms = MoySkladClient(token=ms_token)
+
+st.subheader("1) Сканируй QR/Code128 (например `*CtzwYRSH`)")
+scan = st.text_input("Скан", value="", placeholder="*CtzwYRSH")
+
+debug = st.checkbox("Показать debug", value=True)
+
+if debug and scan:
+    st.code(f"DEBUG scan repr: {scan!r}")
+
+st.subheader("2) Найти заказ в МойСклад по ШККОД128 и записать коды в description")
+
+cis_block = st.text_area(
+    "Список DataMatrix (каждый код с новой строки)",
+    height=200,
+    placeholder="010...21...\n010...21...\n...",
+)
+
+btn = st.button("Найти заказ и записать [CIS] блок", type="primary", disabled=not (scan.strip() and cis_block.strip()))
+
+if btn:
+    value = scan.strip()
+
     try:
-        for k, v in st.secrets.items():
-            data[k] = str(v)
-    except Exception:
-        pass
+        # 1) основной метод — filter по attributes.<attrId>=value
+        order = ms.find_customerorder_by_attr_id_value(qr_attr_id.strip(), value)
 
-    keys = [
-        "MS_BASE_URL",
-        "MS_TOKEN",
-        "MS_ATTR_CIS_REQUIRED",
-        "MS_BUNDLE_MARK_FLAG",
-        "MS_ORDER_QR_ATTR_HREF",
-        "MAX_COMPONENT_FETCH",
-        "MAX_BRUTEFORCE_ORDERS",
-    ]
-    for k in keys:
-        if k not in data and os.getenv(k):
-            data[k] = os.getenv(k)
+        # 2) fallback — search
+        if not order:
+            order = ms.search_customerorder(value)
 
-    return Settings(**data)
+        # 3) fallback — bruteforce последних заказов
+        if not order:
+            order = ms.find_customerorder_by_attr_bruteforce_recent(qr_attr_name.strip(), value, limit=2000)
 
+        if not order:
+            st.error("Заказ не найден в МойСклад")
+            st.stop()
 
-def load_order(ms: MoySkladClient, settings: Settings, query: str) -> None:
-    query = (query or "").strip()
-    st.caption(f"DEBUG scan repr: {query!r}")
+        order_id = order["id"]
+        order_name = order.get("name", "")
+        st.success(f"Найден заказ: {order_name} ({order_id})")
 
-    if not query:
-        st.warning("Отсканируй QR (*XXXX) или введи номер заказа (4345577084)")
-        st.stop()
+        # Формируем блок
+        cis_lines = [x.strip() for x in cis_block.splitlines() if x.strip()]
+        block = "[CIS]\n" + "\n".join(cis_lines) + "\n[/CIS]"
 
-    try:
-        row = None
-        attr_href = (getattr(settings, "MS_ORDER_QR_ATTR_HREF", "") or "").strip()
+        updated = ms.append_to_customerorder_description(order_id, block)
+        st.success("Записал коды в customerorder.description ✅")
 
-        # 1) быстрый фильтр
-        if attr_href:
-            row = ms.find_customerorder_by_attr_href_value_fast(attr_href, query)
-
-        # 2) железобетонный брютфорс по последним заказам
-        if not row and attr_href:
-            max_orders = int(getattr(settings, "MAX_BRUTEFORCE_ORDERS", 800) or 800)
-            with st.spinner(f"Не найдено быстрым фильтром. Ищу в последних {max_orders} заказах..."):
-                row = ms.find_customerorder_by_attr_href_value_bruteforce(
-                    attr_href=attr_href,
-                    value=query,
-                    max_orders=max_orders,
-                )
-
-        # 3) по номеру заказа
-        if not row:
-            row = ms.find_customerorder_by_name(query)
+        if debug:
+            st.write("Текущее description (кусок):")
+            st.code((updated.get("description") or "")[:2000])
 
     except HttpError as e:
         st.error(f"Ошибка МойСклад: HTTP {e.status}")
         st.json(e.payload)
-        st.stop()
-
-    if not row:
-        st.error("Заказ не найден в МойСклад")
-        st.stop()
-
-    order_id = row["id"]
-
-    try:
-        full = ms.get_customerorder_full(order_id)
-    except HttpError as e:
-        st.error(f"Ошибка загрузки заказа: HTTP {e.status}")
-        st.json(e.payload)
-        st.stop()
-
-    expected, lines, warnings = calc_expected_cis_units(
-        ms=ms,
-        order_full=full,
-        attr_cis_required=settings.MS_ATTR_CIS_REQUIRED,
-        bundle_mark_flag=settings.MS_BUNDLE_MARK_FLAG,
-        max_component_fetch=settings.MAX_COMPONENT_FETCH,
-    )
-
-    st.session_state["order_id"] = order_id
-    st.session_state["order_full"] = full
-    st.session_state["expected"] = expected
-    st.session_state["lines"] = lines
-    st.session_state["warnings"] = warnings
-
-
-with st.sidebar:
-    st.subheader("Настройки")
-    try:
-        settings = load_settings()
-        st.success("Settings OK")
     except Exception as e:
-        st.error(f"Settings error: {e}")
-        st.stop()
-
-    dry_run = st.toggle("Dry run (не записывать в МС)", value=False)
-
-ms = MoySkladClient(
-    base_url=settings.MS_BASE_URL,
-    token=settings.ms_auth_header(),
-)
-
-st.markdown("### Сканируй QR из oShip (значение ШККОД128) или введи номер заказа")
-
-with st.form("scan_form", clear_on_submit=False):
-    scan_value = st.text_input("QR / номер заказа", placeholder="*CtzwYRSH или 4345577084")
-    submit = st.form_submit_button("Открыть заказ")
-
-if submit:
-    load_order(ms, settings, scan_value)
-
-if "order_full" in st.session_state:
-    order = st.session_state["order_full"]
-    expected = st.session_state["expected"]
-    lines = st.session_state["lines"]
-    warnings = st.session_state["warnings"]
-
-    st.divider()
-    st.success(f"Заказ {order.get('name')} | Нужно КМ: {expected}")
-
-    if warnings:
-        st.warning("\n".join(warnings))
-
-    with st.expander("Показать расчёт по позициям"):
-        for ln in lines:
-            if ln.get("type") == "component":
-                st.write(
-                    f"Комплект: **{ln.get('bundle')}** → {ln.get('name')} | "
-                    f"шт: {ln.get('units')} | ЧЗ: {ln.get('need_cis')}"
-                )
-            else:
-                st.write(f"{ln.get('name')} | шт: {ln.get('units')} | ЧЗ: {ln.get('need_cis')}")
-
-    st.markdown("### Сканирование DataMatrix (каждый код с новой строки)")
-    raw = st.text_area("Коды", height=260)
-
-    codes, dups = normalize_codes(raw)
-
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Уникальных", len(codes))
-    c2.metric("Дубли", len(dups))
-    c3.metric("Ожидалось", expected)
-    c4.metric("Отклонение", len(codes) - expected)
-
-    if dups:
-        st.error("Есть дубли (первые 10):\n" + "\n".join(dups[:10]))
-
-    save_ok = (len(dups) == 0) and (expected == 0 or len(codes) == expected)
-    if expected > 0 and len(codes) != expected:
-        st.info("Чтобы сохранить, количество кодов должно совпасть с ожидаемым.")
-
-    if st.button("✅ Записать в МойСклад", disabled=not save_ok, type="primary"):
-        new_desc = replace_cis_block(order.get("description") or "", codes)
-
-        if dry_run:
-            st.success("Dry run: запись не выполнена. Ниже пример description:")
-            st.code(new_desc)
-        else:
-            try:
-                ms.update_customerorder_description(st.session_state["order_id"], new_desc)
-                st.success("Коды сохранены в customerorder.description ✅")
-            except HttpError as e:
-                st.error(f"Ошибка записи: HTTP {e.status}")
-                st.json(e.payload)
+        st.exception(e)
