@@ -105,27 +105,45 @@ ms = MoySkladClient(
 # DEBUG кнопка — покажет, как API реально видит атрибуты customerorder
 with st.sidebar:
     st.divider()
-    if st.button("DEBUG: атрибуты (customerorder/demand/invoiceout)"):
+    debug_order = st.text_input("DEBUG: номер заказа (customerorder.name)", value="")
+    if st.button("DEBUG: показать поля заказа"):
+        if not debug_order.strip():
+            st.error("Введи номер заказа")
+            st.stop()
         try:
-            entities = ["customerorder", "demand", "invoiceout"]
-            result = {}
-            for ent in entities:
-                meta = ms.get(f"/entity/{ent}/metadata")
-                attrs = meta.get("attributes") or []
-                out = []
-                for a in attrs:
-                    if isinstance(a, dict):
-                        out.append({
-                            "name": a.get("name"),
-                            "type": a.get("type"),
-                            "href": (a.get("meta") or {}).get("href"),
-                        })
-                result[ent] = out
-            st.json(result)
+            row = ms.find_customerorder_by_name(debug_order.strip())
+            if not row:
+                st.error("Заказ не найден")
+                st.stop()
+
+            full = ms.get_customerorder_full(row["id"])
+
+            # Вытаскиваем основные поля, где чаще всего лежит такой QR/штрихкод
+            dbg = {
+                "id": full.get("id"),
+                "name": full.get("name"),
+                "code": full.get("code"),
+                "externalCode": full.get("externalCode"),
+                "description": full.get("description"),
+                "agent": (full.get("agent") or {}).get("meta"),
+                "shipmentAddress": full.get("shipmentAddress"),
+                "shipmentAddressFull": full.get("shipmentAddressFull"),
+                "organizationAccount": (full.get("organizationAccount") or {}).get("meta"),
+                "attributes": full.get("attributes"),
+            }
+            st.json(dbg)
+
+            # Дополнительно: покажем позиции (иногда QR кладут в позицию/коммент)
+            pos = (full.get("positions") or {}).get("rows") or []
+            st.write("positions count:", len(pos))
+            if pos:
+                st.json(pos[0])  # первая позиция как пример
+
         except HttpError as e:
             st.error(f"HTTP {e.status}")
             st.json(e.payload)
         st.stop()
+
 
 
 
