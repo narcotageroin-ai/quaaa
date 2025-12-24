@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, List
+from typing import Any, Dict, Optional, List, Tuple
 from datetime import datetime
+import time
 
 import requests
 
@@ -12,25 +13,6 @@ class HttpError(Exception):
         super().__init__(f"HTTP {status}: {payload}")
         self.status = status
         self.payload = payload
-
-
-def request_json(
-    method: str,
-    url: str,
-    headers: Dict[str, str],
-    params: Optional[Dict[str, Any]] = None,
-    json: Any = None,
-) -> Any:
-    resp = requests.request(method, url, headers=headers, params=params, json=json, timeout=60)
-    if resp.status_code >= 400:
-        try:
-            payload = resp.json()
-        except Exception:
-            payload = resp.text
-        raise HttpError(resp.status_code, payload)
-    if resp.status_code == 204:
-        return None
-    return resp.json()
 
 
 def parse_ms_dt(s: str) -> Optional[datetime]:
@@ -43,6 +25,71 @@ def parse_ms_dt(s: str) -> Optional[datetime]:
         except Exception:
             pass
     return None
+
+
+def _should_retry_http(status: int) -> bool:
+    return status in (429, 500, 502, 503, 504)
+
+
+def request_json(
+    method: str,
+    url: str,
+    headers: Dict[str, str],
+    params: Optional[Dict[str, Any]] = None,
+    json: Any = None,
+    timeout: Tuple[float, float] = (20.0, 90.0),  # (connect, read)
+    max_retries: int = 4,
+) -> Any:
+    """
+    Ретраи на:
+    - ReadTimeout/ConnectTimeout
+    - 429 / 5xx
+    """
+    last_exc: Optional[Exception] = None
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            resp = requests.request(
+                method, url,
+                headers=headers,
+                params=params,
+                json=json,
+                timeout=timeout,
+            )
+            if resp.status_code >= 400:
+                try:
+                    payload = resp.json()
+                except Exception:
+                    payload = resp.text
+
+                if _should_retry_http(resp.status_code) and attempt < max_retries:
+                    time.sleep(min(2.0, 0.4 * (2 ** (attempt - 1))))
+                    continue
+
+                raise HttpError(resp.status_code, payload)
+
+            if resp.status_code == 204:
+                return None
+            return resp.json()
+
+        except (requests.exceptions.ReadTimeout, requests.exceptions.ConnectTimeout) as e:
+            last_exc = e
+            if attempt < max_retries:
+                time.sleep(min(2.0, 0.4 * (2 ** (attempt - 1))))
+                continue
+            raise
+
+        except requests.exceptions.RequestException as e:
+            # прочие сетевые — тоже можно 1-2 раза ретраить
+            last_exc = e
+            if attempt < max_retries:
+                time.sleep(min(2.0, 0.4 * (2 ** (attempt - 1))))
+                continue
+            raise
+
+    if last_exc:
+        raise last_exc
+    raise RuntimeError("request_json failed unexpectedly")
 
 
 @dataclass
@@ -81,9 +128,8 @@ class MoySkladClient:
         return page.get("rows", []) if isinstance(page, dict) else []
 
     @staticmethod
-    def _attr_match_full(order_full: Dict[str, Any], attr_id: str, attr_name: str, value: str) -> bool:
-        attrs = order_full.get("attributes") or []
-        for a in attrs:
+    def _match_attrs(attrs: List[Dict[str, Any]], attr_id: str, attr_name: str, value: str) -> bool:
+        for a in (attrs or []):
             if str(a.get("value", "")).strip() != value:
                 continue
             if attr_id and str(a.get("id", "")).strip() == attr_id:
@@ -97,17 +143,12 @@ class MoySkladClient:
         value: str,
         attr_id: str = "",
         attr_name: str = "",
-        limit_total: int = 800,
-        page_size: int = 100,
-        date_from: str = "",  # 'YYYY-MM-DD' или 'YYYY-MM-DD HH:MM:SS'
-        progress_cb=None,     # progress_cb(scanned, total, offset)
+        limit_total: int = 600,
+        page_size: int = 120,
+        date_from: str = "",          # 'YYYY-MM-DD' или 'YYYY-MM-DD HH:MM:SS'
+        max_full_reads: int = 200,    # ограничиваем число full GET
+        progress_cb=None,             # progress_cb(scanned, total, offset, full_reads)
     ) -> Optional[Dict[str, Any]]:
-        """
-        ГАРАНТИРОВАННЫЙ поиск:
-        - берём последние N заказов (moment desc)
-        - при date_from: стопаемся когда moment < date_from (дальше будут только старее)
-        - по каждому делаем GET /customerorder/{id} и проверяем attributes
-        """
         value = (value or "").strip()
         attr_id = (attr_id or "").strip()
         attr_name = (attr_name or "").strip()
@@ -118,15 +159,16 @@ class MoySkladClient:
         if date_from:
             df = date_from.strip()
             if len(df) == 10:
-                df = df + " 00:00:00"
+                df += " 00:00:00"
             date_from_dt = parse_ms_dt(df)
 
         offset = 0
         scanned = 0
+        full_reads = 0
 
         def _progress():
             if progress_cb:
-                progress_cb(scanned, limit_total, offset)
+                progress_cb(scanned, limit_total, offset, full_reads)
 
         _progress()
 
@@ -140,7 +182,7 @@ class MoySkladClient:
                 if scanned >= limit_total:
                     break
 
-                # ранний stop по дате
+                # ранний stop по дате (так как moment desc)
                 if date_from_dt:
                     m = parse_ms_dt(co.get("moment", ""))
                     if m and m < date_from_dt:
@@ -148,12 +190,31 @@ class MoySkladClient:
                         return None
 
                 scanned += 1
+
+                # 1) если attributes случайно пришли в rows — проверим без full GET
+                attrs_short = co.get("attributes")
+                if isinstance(attrs_short, list) and self._match_attrs(attrs_short, attr_id, attr_name, value):
+                    # на всякий случай дочитаем full (чтобы писать description уже в точный объект)
+                    oid = co.get("id")
+                    if not oid:
+                        continue
+                    full_reads += 1
+                    _progress()
+                    return self.get_customerorder(oid)
+
+                # 2) иначе — full GET, но с лимитом, чтобы не убить API
                 oid = co.get("id")
                 if not oid:
                     continue
 
+                if full_reads >= max_full_reads:
+                    _progress()
+                    # лимит full чтений исчерпан — дальше смысла нет, попросим увеличить/сузить дату
+                    return None
+
+                full_reads += 1
                 full = self.get_customerorder(oid)
-                if self._attr_match_full(full, attr_id=attr_id, attr_name=attr_name, value=value):
+                if self._match_attrs(full.get("attributes") or [], attr_id, attr_name, value):
                     _progress()
                     return full
 
