@@ -40,22 +40,19 @@ def request_json(
     timeout: Tuple[float, float] = (20.0, 90.0),  # (connect, read)
     max_retries: int = 4,
 ) -> Any:
-    """
-    Ретраи на:
-    - ReadTimeout/ConnectTimeout
-    - 429 / 5xx
-    """
     last_exc: Optional[Exception] = None
 
     for attempt in range(1, max_retries + 1):
         try:
             resp = requests.request(
-                method, url,
+                method,
+                url,
                 headers=headers,
                 params=params,
                 json=json,
                 timeout=timeout,
             )
+
             if resp.status_code >= 400:
                 try:
                     payload = resp.json()
@@ -80,7 +77,6 @@ def request_json(
             raise
 
         except requests.exceptions.RequestException as e:
-            # прочие сетевые — тоже можно 1-2 раза ретраить
             last_exc = e
             if attempt < max_retries:
                 time.sleep(min(2.0, 0.4 * (2 ** (attempt - 1))))
@@ -124,7 +120,10 @@ class MoySkladClient:
         return self.get(f"/entity/customerorder/{order_id}")
 
     def list_customerorders_page(self, limit: int, offset: int) -> List[Dict[str, Any]]:
-        page = self.get("/entity/customerorder", params={"limit": limit, "offset": offset, "order": "moment,desc"})
+        page = self.get(
+            "/entity/customerorder",
+            params={"limit": limit, "offset": offset, "order": "moment,desc"},
+        )
         return page.get("rows", []) if isinstance(page, dict) else []
 
     @staticmethod
@@ -146,7 +145,7 @@ class MoySkladClient:
         limit_total: int = 600,
         page_size: int = 120,
         date_from: str = "",          # 'YYYY-MM-DD' или 'YYYY-MM-DD HH:MM:SS'
-        max_full_reads: int = 200,    # ограничиваем число full GET
+        max_full_reads: int = 250,    # ✅ важно: теперь есть
         progress_cb=None,             # progress_cb(scanned, total, offset, full_reads)
     ) -> Optional[Dict[str, Any]]:
         value = (value or "").strip()
@@ -182,7 +181,7 @@ class MoySkladClient:
                 if scanned >= limit_total:
                     break
 
-                # ранний stop по дате (так как moment desc)
+                # ранний stop по дате
                 if date_from_dt:
                     m = parse_ms_dt(co.get("moment", ""))
                     if m and m < date_from_dt:
@@ -191,10 +190,9 @@ class MoySkladClient:
 
                 scanned += 1
 
-                # 1) если attributes случайно пришли в rows — проверим без full GET
+                # если attributes вдруг пришли в short-rows — проверим сразу
                 attrs_short = co.get("attributes")
                 if isinstance(attrs_short, list) and self._match_attrs(attrs_short, attr_id, attr_name, value):
-                    # на всякий случай дочитаем full (чтобы писать description уже в точный объект)
                     oid = co.get("id")
                     if not oid:
                         continue
@@ -202,14 +200,12 @@ class MoySkladClient:
                     _progress()
                     return self.get_customerorder(oid)
 
-                # 2) иначе — full GET, но с лимитом, чтобы не убить API
                 oid = co.get("id")
                 if not oid:
                     continue
 
                 if full_reads >= max_full_reads:
                     _progress()
-                    # лимит full чтений исчерпан — дальше смысла нет, попросим увеличить/сузить дату
                     return None
 
                 full_reads += 1
