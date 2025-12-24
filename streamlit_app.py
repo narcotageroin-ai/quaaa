@@ -155,44 +155,48 @@ with right:
     if scan_val.strip() and not found:
         st.warning("Не найдено в индексе. Подожди авто-обновление (до 10 минут) или убедись, что заказ реально в статусе «упаковка» и с DATE_FROM попадает.")
     if found:
-        st.success(f"Найден заказ: {found['order_name']} | id={found['order_id']} | moment={found.get('moment')}")
-        st.caption(f"Ожидается КИЗов: {int(found.get('expected_units') or 0)}")
-
-        pos = db.lookup_positions(scan_val.strip())
-        with st.expander("Распаковка комплекта → товары", expanded=True):
-            st.dataframe(pos, use_container_width=True, height=220)
-
         st.divider()
 
-        # ---- Сканирование КИЗов по одному (авто новая строка) ----
-st.subheader("Сканируй КИЗы (DataMatrix) по одному")
+# ---- Сканирование КИЗов ----
+st.subheader("Сканируй КИЗы (DataMatrix)")
 
 if "cis_scanned" not in st.session_state:
-    st.session_state["cis_scanned"] = []  # список в порядке сканирования
+    st.session_state["cis_scanned"] = []
 
 def add_cis(val: str):
     v = (val or "").strip()
     if not v:
         return
-    # не даём дублей
     if v not in st.session_state["cis_scanned"]:
         st.session_state["cis_scanned"].append(v)
 
-def on_cis_scan():
-    # берём значение из виджета
+def on_cis_change():
     v = (st.session_state.get("cis_one_input") or "").strip()
     if v:
         add_cis(v)
-    # ✅ очищаем поле корректно (в callback)
+    # очистка в callback — безопасно
     st.session_state["cis_one_input"] = ""
 
+# Поле под скан (если сканер шлёт Enter — on_change сработает)
 st.text_input(
-    "КИЗ (один скан)",
-    value="",
+    "КИЗ (один скан) — обычно сканер завершает ввод Enter",
     key="cis_one_input",
     placeholder="010...21...",
-    on_change=on_cis_scan,
+    on_change=on_cis_change,
 )
+
+# На случай сканера БЕЗ Enter — ручное добавление кнопкой
+col_add1, col_add2 = st.columns([1, 1])
+with col_add1:
+    if st.button("➕ Добавить КИЗ (если сканер без Enter)"):
+        v = (st.session_state.get("cis_one_input") or "").strip()
+        if v:
+            add_cis(v)
+        st.session_state["cis_one_input"] = ""
+        st.rerun()
+
+with col_add2:
+    st.caption("Если у тебя сканер не нажимает Enter — используй кнопку ➕")
 
 expected = int(found.get("expected_units") or 0)
 scanned_count = len(st.session_state["cis_scanned"])
@@ -210,7 +214,7 @@ st.text_area(
 
 c1, c2, c3 = st.columns(3)
 with c1:
-    if st.button("🧹 Очистить КИЗы"):
+    if st.button("🧹 Очистить"):
         st.session_state["cis_scanned"] = []
         st.session_state["cis_one_input"] = ""
         st.rerun()
@@ -218,42 +222,44 @@ with c2:
     if st.button("↩️ Удалить последний"):
         if st.session_state["cis_scanned"]:
             st.session_state["cis_scanned"].pop()
-        st.session_state["cis_one_input"] = ""
         st.rerun()
 with c3:
     if st.button("🔄 Обновить индекс сейчас"):
-        try:
-            run_indexing(auto=False)
-        finally:
-            st.session_state["cis_one_input"] = ""
-            st.rerun()
+        run_indexing(auto=False)
+        st.rerun()
 
-        st.subheader("Отправка в МойСклад")
-        if not can_send:
-            st.error("Нельзя отправить: не просканены ВСЕ КИЗы комплекта.")
-        send_btn = st.button("✅ Записать [CIS] в customerorder.description", disabled=not can_send)
+st.divider()
 
-        if send_btn:
-            try:
-                order_id = found["order_id"]
-                cis_lines = st.session_state["cis_scanned"]
-                block = "[CIS]\n" + "\n".join(cis_lines) + "\n[/CIS]"
+# ---- Отправка в МС ----
+st.subheader("Отправка в МойСклад")
 
-                updated = ms.append_to_customerorder_description(order_id, block)
+# 5) не давать отправить, если не все КИЗы
+can_send = (expected > 0) and (scanned_count == expected)
 
-                # 2) убрать из списка: помечаем done в БД, и в МС уже есть [CIS]
-                db.mark_done(scan_val.strip())
+if not can_send:
+    st.error("Нельзя отправить: не просканены ВСЕ КИЗы комплекта.")
 
-                st.success("Записал коды в customerorder.description ✅ Заказ помечен обработанным и исчезнет из списка.")
-                # очистим для следующего заказа
-                st.session_state["cis_scanned"] = []
-                st.session_state["scan_code128"] = ""
-                st.rerun()
+send_btn = st.button("✅ Записать [CIS] в customerorder.description", disabled=not can_send)
 
-            except HttpError as e:
-                st.error(f"Ошибка МойСклад: HTTP {e.status}")
-                st.json(e.payload)
-            except (ReadTimeout, ConnectTimeout):
-                st.error("МойСклад долго отвечает. Попробуй ещё раз.")
-            except Exception as e:
-                st.exception(e)
+if send_btn:
+    try:
+        order_id = found["order_id"]
+        cis_lines = st.session_state["cis_scanned"]
+        block = "[CIS]\n" + "\n".join(cis_lines) + "\n[/CIS]"
+
+        updated = ms.append_to_customerorder_description(order_id, block)
+
+        # помечаем как done, чтобы исчез из списка
+        db.mark_done(scan_val.strip())
+
+        st.success("Записал ✅ Заказ помечен обработанным и исчезнет из списка.")
+        st.session_state["cis_scanned"] = []
+        st.session_state["scan_code128"] = ""
+        st.session_state["cis_one_input"] = ""
+        st.rerun()
+
+    except HttpError as e:
+        st.error(f"Ошибка МойСклад: HTTP {e.status}")
+        st.json(e.payload)
+    except Exception as e:
+        st.exception(e)
