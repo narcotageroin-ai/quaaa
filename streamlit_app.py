@@ -1,131 +1,168 @@
 from __future__ import annotations
 
-import inspect
+import os
 import streamlit as st
 from requests.exceptions import ReadTimeout, ConnectTimeout
 
 from src.moysklad import MoySkladClient, HttpError
+from src.index_db import IndexDB
+from src.indexer import (
+    list_customerorders_packing_since,
+    extract_attr_value,
+    get_customerorder_positions_expand,
+    explode_order_positions,
+)
 
-st.set_page_config(page_title="CIS Scanner → МойСклад", layout="centered")
-st.write("BUILD:", "2025-12-23 COMPAT-MAXFULL")
-st.title("Сканер маркировки (DataMatrix) → МойСклад (customerorder.description)")
+st.set_page_config(page_title="Packing Index → CIS Writer", layout="centered")
+st.write("BUILD:", "2025-12-24 PACKING-INDEX-SQLITE")
+st.title("Упаковка: индекс заказов (ШККОД128) → мгновенный поиск → запись CIS")
+
+# гарантируем папку под sqlite
+os.makedirs("data", exist_ok=True)
 
 with st.sidebar:
-    st.header("Настройки")
+    st.header("MS настройки")
     ms_token = st.text_input("MS_TOKEN", type="password", value=st.secrets.get("MS_TOKEN", ""))
 
+    ms_packing_state_href = st.text_input(
+        "MS_PACKING_STATE_HREF (href статуса «упаковка»)",
+        value=st.secrets.get("MS_PACKING_STATE_HREF", ""),
+        placeholder="https://api.moysklad.ru/api/remap/1.2/entity/customerorder/metadata/states/....",
+    )
+
+    st.divider()
+    st.header("Атрибут ШККОД128")
     qr_attr_id = st.text_input(
-        "MS_ORDER_QR_ATTR_ID (id доп.поля ШККОД128)",
+        "MS_ORDER_QR_ATTR_ID",
         value=st.secrets.get("MS_ORDER_QR_ATTR_ID", "687d964c-5a22-11ee-0a80-032800443111"),
     )
     qr_attr_name = st.text_input(
-        "MS_ORDER_QR_ATTR_NAME (fallback имя)",
+        "MS_ORDER_QR_ATTR_NAME (fallback)",
         value=st.secrets.get("MS_ORDER_QR_ATTR_NAME", "ШККОД128"),
     )
 
-    date_from = st.text_input(
-        "Искать заказы после даты (YYYY-MM-DD)",
-        value=st.secrets.get("DATE_FROM", "2025-12-20"),
-    )
+    st.divider()
+    st.header("Индексирование")
+    date_from = st.text_input("Брать заказы начиная с (YYYY-MM-DD)", value=st.secrets.get("DATE_FROM", "2025-12-20"))
+    max_total = st.number_input("Макс. заказов за прогон", min_value=50, max_value=20000, value=int(st.secrets.get("MAX_TOTAL", 4000)))
+    page_limit = st.number_input("Пачка MS limit", min_value=50, max_value=500, value=int(st.secrets.get("PAGE_LIMIT", 200)))
 
-    limit_total = st.number_input("Макс. сколько заказов проверить", min_value=50, max_value=5000, value=int(st.secrets.get("LIMIT_TOTAL", 600)))
-    page_size = st.number_input("Размер пачки (страницы)", min_value=20, max_value=500, value=int(st.secrets.get("PAGE_SIZE", 120)))
-    max_full_reads = st.number_input("Лимит full GET (если поддерживается)", min_value=20, max_value=2000, value=int(st.secrets.get("MAX_FULL_READS", 250)))
+db = IndexDB("data/index.sqlite")
+db.init()
 
 if not ms_token.strip():
-    st.warning("Укажи MS_TOKEN в сайдбаре.")
+    st.warning("Введи MS_TOKEN в сайдбаре.")
+    st.stop()
+
+if not ms_packing_state_href.strip():
+    st.warning("Введи MS_PACKING_STATE_HREF (href статуса «упаковка») в сайдбаре.")
     st.stop()
 
 ms = MoySkladClient(token=ms_token)
 
-st.subheader("1) Сканируй QR/Code128 (ШККОД128), например `*CtzwYRSH`")
-scan = st.text_input("Скан", value="", placeholder="*CtzwYRSH")
-scan_val = (scan or "").strip()
-st.caption(f"DEBUG scan repr: {scan_val!r}" if scan_val else "DEBUG scan repr: ''")
+# ------------------ Блок обновления индекса ------------------
+st.subheader("1) Обновить индекс заказов «упаковка»")
+colA, colB = st.columns([1, 2])
+with colA:
+    do_index = st.button("🔄 Обновить индекс", type="primary")
+with colB:
+    st.caption("Индекс: ШККОД128 → заказ + распакованные позиции (bundle → components)")
 
-st.subheader("2) Коды DataMatrix (каждый с новой строки)")
-cis_block = st.text_area("DataMatrix", height=220, placeholder="010...21...\n010...21...\n...")
-
-col1, col2 = st.columns(2)
-with col1:
-    find_btn = st.button("🔎 Найти заказ по QR", type="primary", disabled=not scan_val)
-with col2:
-    write_btn = st.button("✅ Записать [CIS] в description", disabled=not (scan_val and cis_block.strip()))
-
-
-def find_order(value: str):
-    prog = st.progress(0, text="Ищу заказ...")
-    status = st.empty()
-
-    # коллбек может быть разной сигнатуры в разных версиях moysklad.py — делаем универсальный
-    def cb(*args):
-        # ожидаем минимум scanned,total,offset,...
-        scanned = args[0] if len(args) > 0 else 0
-        total = args[1] if len(args) > 1 else int(limit_total)
-        offset = args[2] if len(args) > 2 else 0
-        full_reads = args[3] if len(args) > 3 else None
-
-        pct = int(min(100, (scanned / total) * 100)) if total else 100
-        extra = f" | offset={offset}"
-        if full_reads is not None:
-            extra += f" | full GET: {full_reads}"
-        prog.progress(pct, text=f"Проверено {scanned}/{total}{extra}")
-        status.write(f"Проверено: {scanned}/{total} | date_from={date_from}{extra}")
-
-    sig = inspect.signature(ms.find_customerorder_by_attr_value_recent)
-
-    kwargs = dict(
-        value=value,
-        attr_id=qr_attr_id.strip(),
-        attr_name=qr_attr_name.strip(),
-        limit_total=int(limit_total),
-        page_size=int(page_size),
-        date_from=date_from.strip(),
-        progress_cb=cb,
-    )
-
-    if "max_full_reads" in sig.parameters:
-        kwargs["max_full_reads"] = int(max_full_reads)
-
-    order = ms.find_customerorder_by_attr_value_recent(**kwargs)
-    prog.progress(100, text="Готово")
-    return order
-
-
-def extract_shk(order: dict) -> str | None:
-    for a in (order.get("attributes") or []):
-        if str(a.get("id", "")).strip() == qr_attr_id.strip() or str(a.get("name", "")).strip() == qr_attr_name.strip():
-            return a.get("value")
-    return None
-
-
-if find_btn:
+if do_index:
     try:
-        order = find_order(scan_val)
-        if not order:
-            st.error("Заказ не найден (в пределах ограничений). Попробуй сузить/расширить DATE_FROM или увеличить LIMIT_TOTAL.")
-        else:
-            st.success(f"Найден заказ: {order.get('name')} | id={order.get('id')}")
-            st.json({"name": order.get("name"), "id": order.get("id"), "moment": order.get("moment"), "ШККОД128": extract_shk(order)})
+        prog = st.progress(0, text="Загружаю список заказов из МойСклад...")
+        status = st.empty()
+
+        orders = list_customerorders_packing_since(
+            ms=ms,
+            packing_state_href=ms_packing_state_href.strip(),
+            date_from=date_from.strip(),
+            limit=int(page_limit),
+            max_total=int(max_total),
+        )
+
+        status.write(f"Найдено заказов в «упаковка»: {len(orders)}. Индексирую...")
+
+        added = 0
+        skipped = 0
+        no_barcode = 0
+
+        for i, o in enumerate(orders, start=1):
+            oid = o.get("id")
+            if not oid:
+                skipped += 1
+                continue
+
+            # берём полный заказ, чтобы точно были attributes (и moment)
+            full = ms.get_customerorder(oid)
+            b128 = extract_attr_value(full, attr_id=qr_attr_id, attr_name=qr_attr_name)
+            if not b128:
+                no_barcode += 1
+                continue
+
+            # позиции → распаковка
+            pos = get_customerorder_positions_expand(ms, oid)
+            exploded = explode_order_positions(ms, pos)
+
+            db.upsert_order(
+                barcode128=str(b128).strip(),
+                order_id=str(oid),
+                order_name=str(full.get("name") or ""),
+                moment=str(full.get("moment") or ""),
+            )
+            db.replace_positions(str(b128).strip(), exploded)
+            added += 1
+
+            if i % 10 == 0:
+                pct = int((i / max(1, len(orders))) * 100)
+                prog.progress(pct, text=f"Индексирую {i}/{len(orders)}...")
+                status.write(f"Готово: {added} | без ШККОД128: {no_barcode} | пропущено: {skipped}")
+
+        prog.progress(100, text="Индекс обновлён")
+        st.success(f"Индекс обновлён ✅ Заиндексировано: {added} | без ШККОД128: {no_barcode} | пропущено: {skipped}")
+        st.json(db.stats())
+
     except HttpError as e:
         st.error(f"Ошибка МойСклад: HTTP {e.status}")
         st.json(e.payload)
     except (ReadTimeout, ConnectTimeout):
-        st.error("МойСклад долго отвечает/не отвечает. Ретраи включены в клиенте — нажми ещё раз или сузь DATE_FROM.")
+        st.error("МойСклад долго отвечает. Попробуй ещё раз (или уменьши MAX_TOTAL / сдвинь DATE_FROM ближе).")
     except Exception as e:
         st.exception(e)
 
+st.divider()
 
+# ------------------ Блок мгновенного скана ------------------
+st.subheader("2) Скан по ШККОД128 (мгновенно из индекса)")
+scan = st.text_input("Скан (например *CtzwYRSH)", value="", placeholder="*CtzwYRSH")
+scan_val = (scan or "").strip()
+st.caption(f"DEBUG scan repr: {scan_val!r}" if scan_val else "DEBUG scan repr: ''")
+
+if scan_val:
+    found = db.lookup_order(scan_val)
+    if not found:
+        st.warning("Не найдено в индексе. Нажми «Обновить индекс» (или сдвинь DATE_FROM).")
+    else:
+        st.success(f"Найдено: заказ {found['order_name']} | id={found['order_id']} | moment={found.get('moment')}")
+        pos = db.lookup_positions(scan_val)
+        st.write("Распакованные позиции (bundle уже раскрыт):")
+        st.dataframe(pos, use_container_width=True)
+
+st.divider()
+
+# ------------------ Запись CIS ------------------
+st.subheader("3) Записать CIS в customerorder.description")
+cis_block = st.text_area("DataMatrix (каждый с новой строки)", height=220, placeholder="010...21...\n010...21...\n...")
+
+write_btn = st.button("✅ Записать [CIS] в description", disabled=not (scan_val and cis_block.strip()))
 if write_btn:
     try:
-        order = find_order(scan_val)
-        if not order:
-            st.error("Заказ не найден.")
+        found = db.lookup_order(scan_val)
+        if not found:
+            st.error("Скан не найден в индексе. Сначала обнови индекс.")
             st.stop()
 
-        order_id = order["id"]
-        st.info(f"Пишу CIS в заказ {order.get('name')} ({order_id})")
-
+        order_id = found["order_id"]
         cis_lines = [x.strip() for x in cis_block.splitlines() if x.strip()]
         block = "[CIS]\n" + "\n".join(cis_lines) + "\n[/CIS]"
 
@@ -136,7 +173,5 @@ if write_btn:
     except HttpError as e:
         st.error(f"Ошибка МойСклад: HTTP {e.status}")
         st.json(e.payload)
-    except (ReadTimeout, ConnectTimeout):
-        st.error("МойСклад долго отвечает/не отвечает. Попробуй ещё раз.")
     except Exception as e:
         st.exception(e)
