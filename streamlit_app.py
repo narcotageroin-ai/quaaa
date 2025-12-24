@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import streamlit as st
+from requests.exceptions import ReadTimeout, ConnectTimeout  # ✅ нет "requests."
+
 from src.moysklad import MoySkladClient, HttpError
 
 st.set_page_config(page_title="CIS Scanner → МойСклад", layout="centered")
-st.write("BUILD:", "2025-12-23 RETRY-TIMEOUT-FAST")
+st.write("BUILD:", "2025-12-23 RETRY-TIMEOUT-FAST-NO-REQUESTS-NAME")
 st.title("Сканер маркировки (DataMatrix) → МойСклад (customerorder.description)")
 
 with st.sidebar:
@@ -25,9 +27,24 @@ with st.sidebar:
         value=st.secrets.get("DATE_FROM", "2025-12-20"),
     )
 
-    limit_total = st.number_input("Макс. сколько заказов проверить", min_value=50, max_value=5000, value=int(st.secrets.get("LIMIT_TOTAL", 600)))
-    page_size = st.number_input("Размер пачки (страницы)", min_value=20, max_value=500, value=int(st.secrets.get("PAGE_SIZE", 120)))
-    max_full_reads = st.number_input("Лимит full GET заказов (за 1 поиск)", min_value=20, max_value=2000, value=int(st.secrets.get("MAX_FULL_READS", 250)))
+    limit_total = st.number_input(
+        "Макс. сколько заказов проверить",
+        min_value=50,
+        max_value=5000,
+        value=int(st.secrets.get("LIMIT_TOTAL", 600)),
+    )
+    page_size = st.number_input(
+        "Размер пачки (страницы)",
+        min_value=20,
+        max_value=500,
+        value=int(st.secrets.get("PAGE_SIZE", 120)),
+    )
+    max_full_reads = st.number_input(
+        "Лимит full GET заказов (за 1 поиск)",
+        min_value=20,
+        max_value=2000,
+        value=int(st.secrets.get("MAX_FULL_READS", 250)),
+    )
 
 if not ms_token.strip():
     st.warning("Укажи MS_TOKEN в сайдбаре.")
@@ -91,8 +108,8 @@ if find_btn:
     except HttpError as e:
         st.error(f"Ошибка МойСклад: HTTP {e.status}")
         st.json(e.payload)
-    except requests.exceptions.ReadTimeout:
-        st.error("МС долго отвечает и не успел за таймаут. Ретраи уже включены — попробуй ещё раз (или увеличим MAX_FULL_READS/сузим DATE_FROM).")
+    except (ReadTimeout, ConnectTimeout):
+        st.error("МойСклад долго отвечает/не отвечает. Ретраи уже включены — нажми ещё раз или сузь DATE_FROM.")
     except Exception as e:
         st.exception(e)
 
@@ -117,5 +134,7 @@ if write_btn:
     except HttpError as e:
         st.error(f"Ошибка МойСклад: HTTP {e.status}")
         st.json(e.payload)
+    except (ReadTimeout, ConnectTimeout):
+        st.error("МойСклад долго отвечает/не отвечает. Попробуй ещё раз (или сузь DATE_FROM/уменьши LIMIT_TOTAL).")
     except Exception as e:
         st.exception(e)
