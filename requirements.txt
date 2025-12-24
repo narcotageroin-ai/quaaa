@@ -3,3 +3,4 @@ requests>=2.31
 python-dotenv>=1.0
 pydantic>=2.6
 qrcode[pil]>=7.4
+streamlit-autorefresh
