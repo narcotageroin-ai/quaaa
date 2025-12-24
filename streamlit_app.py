@@ -165,61 +165,68 @@ with right:
         st.divider()
 
         # ---- Сканирование КИЗов по одному (авто новая строка) ----
-        st.subheader("Сканируй КИЗы (DataMatrix) по одному")
-        if "cis_scanned" not in st.session_state:
-            st.session_state["cis_scanned"] = []  # список в порядке сканирования
+st.subheader("Сканируй КИЗы (DataMatrix) по одному")
 
-        def add_cis(val: str):
-            v = (val or "").strip()
-            if not v:
-                return
-            # не даём дублей
-            if v not in st.session_state["cis_scanned"]:
-                st.session_state["cis_scanned"].append(v)
+if "cis_scanned" not in st.session_state:
+    st.session_state["cis_scanned"] = []  # список в порядке сканирования
 
-        cis_one = st.text_input("КИЗ (один скан)", value="", key="cis_one_input", placeholder="010...21...")
-        # 4) после каждого скана автоматически уходим на новую строку:
-        if cis_one.strip():
-            add_cis(cis_one)
-            st.session_state["cis_one_input"] = ""  # очищаем поле
+def add_cis(val: str):
+    v = (val or "").strip()
+    if not v:
+        return
+    # не даём дублей
+    if v not in st.session_state["cis_scanned"]:
+        st.session_state["cis_scanned"].append(v)
+
+def on_cis_scan():
+    # берём значение из виджета
+    v = (st.session_state.get("cis_one_input") or "").strip()
+    if v:
+        add_cis(v)
+    # ✅ очищаем поле корректно (в callback)
+    st.session_state["cis_one_input"] = ""
+
+st.text_input(
+    "КИЗ (один скан)",
+    value="",
+    key="cis_one_input",
+    placeholder="010...21...",
+    on_change=on_cis_scan,
+)
+
+expected = int(found.get("expected_units") or 0)
+scanned_count = len(st.session_state["cis_scanned"])
+remaining = max(0, expected - scanned_count)
+
+st.write(f"Просканировано: **{scanned_count}** / **{expected}** | Осталось: **{remaining}**")
+
+st.text_area(
+    "Список просканированных КИЗов",
+    value="\n".join(st.session_state["cis_scanned"]),
+    height=180,
+    key="cis_view",
+    disabled=True,
+)
+
+c1, c2, c3 = st.columns(3)
+with c1:
+    if st.button("🧹 Очистить КИЗы"):
+        st.session_state["cis_scanned"] = []
+        st.session_state["cis_one_input"] = ""
+        st.rerun()
+with c2:
+    if st.button("↩️ Удалить последний"):
+        if st.session_state["cis_scanned"]:
+            st.session_state["cis_scanned"].pop()
+        st.session_state["cis_one_input"] = ""
+        st.rerun()
+with c3:
+    if st.button("🔄 Обновить индекс сейчас"):
+        try:
+            run_indexing(auto=False)
+        finally:
+            st.session_state["cis_one_input"] = ""
             st.rerun()
-
-        expected = int(found.get("expected_units") or 0)
-        scanned_count = len(st.session_state["cis_scanned"])
-        remaining = max(0, expected - scanned_count)
-
-        st.write(f"Просканировано: **{scanned_count}** / **{expected}** | Осталось: **{remaining}**")
-
-        st.text_area(
-            "Список просканированных КИЗов",
-            value="\n".join(st.session_state["cis_scanned"]),
-            height=180,
-            key="cis_view",
-            disabled=True,
-        )
-
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            if st.button("🧹 Очистить КИЗы"):
-                st.session_state["cis_scanned"] = []
-                st.rerun()
-        with c2:
-            if st.button("↩️ Удалить последний"):
-                if st.session_state["cis_scanned"]:
-                    st.session_state["cis_scanned"].pop()
-                    st.rerun()
-        with c3:
-            if st.button("🔄 Обновить индекс сейчас"):
-                try:
-                    run_indexing(auto=False)
-                    st.rerun()
-                except Exception as e:
-                    st.exception(e)
-
-        st.divider()
-
-        # 5) запрет отправки, если не все кизы:
-        can_send = (expected > 0) and (scanned_count == expected)
 
         st.subheader("Отправка в МойСклад")
         if not can_send:
