@@ -1,15 +1,12 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 from datetime import datetime
 
 from src.moysklad import MoySkladClient
 
 
 def _norm_date_from(date_from: str) -> str:
-    """
-    МС фильтр moment>=YYYY-MM-DD HH:MM:SS
-    """
     df = (date_from or "").strip()
     if not df:
         return ""
@@ -28,17 +25,18 @@ def extract_attr_value(order: Dict[str, Any], attr_id: str = "", attr_name: str 
     return None
 
 
+def is_done_by_description(order: Dict[str, Any]) -> bool:
+    desc = (order.get("description") or "")
+    return "[CIS]" in desc and "[/CIS]" in desc
+
+
 def list_customerorders_packing_since(
     ms: MoySkladClient,
     packing_state_href: str,
     date_from: str,
-    limit: int = 100,
-    max_total: int = 2000,
+    limit: int = 200,
+    max_total: int = 4000,
 ) -> List[Dict[str, Any]]:
-    """
-    Тянем заказы строго по фильтру:
-      state=<href>;moment>=<date_from>
-    """
     df = _norm_date_from(date_from)
     offset = 0
     out: List[Dict[str, Any]] = []
@@ -51,12 +49,7 @@ def list_customerorders_packing_since(
             flt += f";moment>={df}"
         page = ms.get(
             "/entity/customerorder",
-            params={
-                "filter": flt,
-                "order": "moment,desc",
-                "limit": take,
-                "offset": offset,
-            },
+            params={"filter": flt, "order": "moment,desc", "limit": take, "offset": offset},
         )
         rows = page.get("rows", []) if isinstance(page, dict) else []
         if not rows:
@@ -69,17 +62,14 @@ def list_customerorders_packing_since(
 
 
 def get_customerorder_positions_expand(ms: MoySkladClient, order_id: str) -> List[Dict[str, Any]]:
-    """
-    Берём позиции с expand=assortment чтобы видеть type(bundle/product) + code/name + barcodes
-    """
-    page = ms.get(f"/entity/customerorder/{order_id}/positions", params={"limit": 1000, "offset": 0, "expand": "assortment"})
+    page = ms.get(
+        f"/entity/customerorder/{order_id}/positions",
+        params={"limit": 1000, "offset": 0, "expand": "assortment"},
+    )
     return page.get("rows", []) if isinstance(page, dict) else []
 
 
 def get_bundle_components(ms: MoySkladClient, bundle_id: str) -> List[Dict[str, Any]]:
-    """
-    Состав комплекта: /entity/bundle/{id}?expand=components.assortment
-    """
     b = ms.get(f"/entity/bundle/{bundle_id}", params={"expand": "components.assortment"})
     comps = (b.get("components") or {}).get("rows") or []
     return comps
@@ -94,11 +84,6 @@ def pick_ean13(assortment: Dict[str, Any]) -> str:
 
 
 def explode_order_positions(ms: MoySkladClient, positions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """
-    Распаковывает bundle → компоненты * qty_bundle
-    обычные товары оставляет как есть.
-    Возвращает плоский список строк для сохранения в БД.
-    """
     out: List[Dict[str, Any]] = []
 
     def add_line(ass: Dict[str, Any], qty: float):
@@ -125,7 +110,6 @@ def explode_order_positions(ms: MoySkladClient, positions: List[Dict[str, Any]])
         if a_type == "bundle":
             bundle_id = ass.get("id")
             comps = get_bundle_components(ms, bundle_id)
-            # components rows обычно содержат quantity + assortment
             for c in comps:
                 c_qty = float(c.get("quantity", 0) or 0)
                 c_ass = c.get("assortment") or {}
@@ -133,15 +117,21 @@ def explode_order_positions(ms: MoySkladClient, positions: List[Dict[str, Any]])
         else:
             add_line(ass, qty)
 
-    # можно агрегировать одинаковые товары (по href/code) чтобы было красиво:
+    # агрегируем одинаковые
     agg: Dict[str, Dict[str, Any]] = {}
     for row in out:
-        key = (row.get("assortment_href") or row.get("code") or row.get("name") or "").strip()
-        if not key:
-            key = str(len(agg) + 1)
+        key = (row.get("assortment_href") or row.get("code") or row.get("name") or "").strip() or str(len(agg) + 1)
         if key not in agg:
             agg[key] = dict(row)
         else:
             agg[key]["quantity"] = float(agg[key].get("quantity", 0) or 0) + float(row.get("quantity", 0) or 0)
 
     return list(agg.values())
+
+
+def expected_units_from_exploded(exploded: List[Dict[str, Any]]) -> int:
+    total = 0.0
+    for r in exploded:
+        total += float(r.get("quantity", 0) or 0)
+    # в твоём кейсе КИЗы = штуки → округляем до int
+    return int(round(total))
